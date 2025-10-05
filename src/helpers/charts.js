@@ -166,63 +166,36 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
     // Call QuickChart API with the generated JSON
     const quickChartResult = await callQuickChartAPI(parsed.value);
     
+    if (!quickChartResult.success || !quickChartResult.url) {
+      return {
+        ok: false,
+        chartConfig: parsed.value,
+        chartUrl: null,
+        quickChartSuccess: false,
+        raw: text,
+        error: quickChartResult.error || 'Failed to generate chart image',
+        processingTime: Date.now() - start
+      };
+    }
+
     return {
       ok: true,
       chartConfig: parsed.value,
       chartUrl: quickChartResult.url,
-      quickChartSuccess: quickChartResult.success,
+      quickChartSuccess: true,
       raw: text,
-      error: quickChartResult.error || null,
+      error: null,
       processingTime: Date.now() - start
     };
   }
 
-  // Fallback: build a minimal bar chart using the prompt as title
-  const title = (String(prompt || '').trim() || 'Generated Chart').slice(0, 80);
-  const fallback = {
-    backgroundColor: '#fff',
-    width: 500,
-    height: 300,
-    devicePixelRatio: 1.0,
-    chart: {
-      type: 'bar',
-      data: {
-        labels: ['Item 1', 'Item 2', 'Item 3', 'Item 4', 'Item 5'],
-        datasets: [
-          {
-            label: 'Values',
-            data: [1, 1, 1, 1, 1],
-            backgroundColor: 'rgba(75,192,192,0.6)',
-            borderColor: 'rgba(75,192,192,1)',
-            borderWidth: 1,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        plugins: {
-          legend: { position: 'top' },
-          title: { display: true, text: title },
-        },
-        scales: {
-          y: { beginAtZero: true, ticks: { display: false }, grid: { display: false } },
-          x: { grid: { display: false } },
-        },
-      },
-    },
-  };
-
-  // Try to call QuickChart API even with fallback
-  const quickChartResult = await callQuickChartAPI(fallback);
-
   return {
-    ok: true,
-    chartConfig: fallback,
-    chartUrl: quickChartResult.url,
-    quickChartSuccess: quickChartResult.success,
+    ok: false,
+    chartConfig: null,
+    chartUrl: null,
+    quickChartSuccess: false,
     raw: text,
-    error: quickChartResult.error || null,
-    processingTime: Date.now() - start,
-    warning: 'FALLBACK_CHART',
+    error: parsed.error || 'Invalid chart configuration returned by the model',
+    processingTime: Date.now() - start
   };
 }
