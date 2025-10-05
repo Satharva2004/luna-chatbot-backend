@@ -62,7 +62,8 @@ const allowedOrigins = [
   'http://localhost:3000', // Development
   'https://research-six-mu.vercel.app', //Productions
   'https://finance-u.vercel.app', //FinanceU
-  'http://localhost:8080' // Localhost
+  'http://localhost:8080', // Localhost
+  'https://lunnaa.vercel.app' //Lunna
 ];
 
 // Enable CORS for all routes

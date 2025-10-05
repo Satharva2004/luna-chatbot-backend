@@ -15,7 +15,7 @@ export const createUploadsDir = () => {
     ? path.join(__dirname, '../../uploads')
     : os.tmpdir();
   
-  const uploadsDir = path.join(baseDir, 'eduvance-uploads');
+  const uploadsDir = path.join(baseDir, 'Luna-uploads');
   
   try {
     // Create uploads directory if it doesn't exist
