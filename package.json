@@ -20,6 +20,7 @@
     "dotenv": "^17.2.2",
     "express": "^4.18.2",
     "file-type": "^21.0.0",
+    "google-auth-library": "^10.4.0",
     "jsonwebtoken": "^9.0.2",
     "mammoth": "^1.11.0",
     "multer": "^2.0.2",

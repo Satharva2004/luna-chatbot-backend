@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { OAuth2Client } from 'google-auth-library';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -8,6 +9,13 @@ dotenv.config();
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY; // Changed from SUPABASE_SERVICE_KEY to SUPABASE_ANON_KEY
 const supabase = createClient(supabaseUrl, supabaseKey);
+
+const googleClientId = process.env.GOOGLE_CLIENT_ID;
+const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
+const googleOAuthClient =
+  googleClientId && googleClientSecret
+    ? new OAuth2Client(googleClientId, googleClientSecret, 'postmessage')
+    : null;
 
 // Helper function to generate JWT token
 const generateToken = (userId) => {
@@ -148,6 +156,115 @@ export const loginUser = async (req, res) => {
     res.status(500).json({ 
       status: 'error',
       message: 'Internal server error' 
+    });
+  }
+};
+
+export const googleAuth = async (req, res) => {
+  try {
+    if (!googleOAuthClient) {
+      return res.status(500).json({
+        status: 'error',
+        message: 'Google authentication is not configured',
+      });
+    }
+
+    const { code } = req.body;
+
+    if (!code) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Missing Google authorization code',
+      });
+    }
+
+    const { tokens } = await googleOAuthClient.getToken(code);
+
+    if (!tokens?.id_token) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Unable to retrieve Google ID token',
+      });
+    }
+
+    googleOAuthClient.setCredentials(tokens);
+
+    const ticket = await googleOAuthClient.verifyIdToken({
+      idToken: tokens.id_token,
+      audience: googleClientId,
+    });
+
+    const payload = ticket.getPayload();
+
+    if (!payload || !payload.email) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Unable to verify Google credential',
+      });
+    }
+
+    const email = payload.email;
+    const displayName = payload.name?.trim() || email.split('@')[0];
+
+    const { data: existingUser, error: existingUserError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', email)
+      .single();
+
+    if (existingUserError && existingUserError.code !== 'PGRST116') {
+      console.error('Error fetching user during Google auth:', existingUserError);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Failed to process Google login',
+      });
+    }
+
+    let userRecord = existingUser;
+
+    if (!userRecord) {
+      const username = email.split('@')[0];
+      const hashedPlaceholderPassword = await bcrypt.hash(payload.sub || email, 10);
+
+      const { data: newUser, error: createError } = await supabase
+        .from('users')
+        .insert({
+          username,
+          email,
+          password_hash: hashedPlaceholderPassword,
+        })
+        .select()
+        .single();
+
+      if (createError) {
+        console.error('Error creating user during Google auth:', createError);
+        return res.status(500).json({
+          status: 'error',
+          message: 'Failed to create user from Google account',
+        });
+      }
+
+      userRecord = newUser;
+    }
+
+    const token = generateToken(userRecord.id);
+    const { password_hash: _passwordHash, ...userWithoutPassword } = userRecord;
+
+    res.status(200).json({
+      status: 'success',
+      token,
+      data: {
+        user: {
+          ...userWithoutPassword,
+          username: userWithoutPassword.username ?? displayName,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Error in googleAuth:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Internal server error during Google authentication',
     });
   }
 };
