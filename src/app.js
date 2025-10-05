@@ -12,7 +12,7 @@ import uploadRouter from "./routers/uploadRouter.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
+//env
 const envPaths = [
   join(__dirname, '..', '.env'),     
   join(__dirname, '.env'),           
