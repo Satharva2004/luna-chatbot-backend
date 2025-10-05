@@ -160,6 +160,11 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
     ? cand.content.parts.map(p => (typeof p?.text === 'string' ? p.text : '')).join('')
     : '';
 
+  // Log the raw response from Gemini for debugging
+  // console.log('=== Gemini Raw Response ===');
+  // console.log(text);
+  // console.log('==========================');
+
   const parsed = tryParseJson(text.trim());
 
   if (parsed.ok) {
