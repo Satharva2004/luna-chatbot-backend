@@ -508,14 +508,13 @@ export async function getConversationHistory(req, res) {
     if (convError || !conversation) {
       return res.status(404).json({ error: 'Conversation not found' });
     }
-
     if (userId && conversation.user_id && conversation.user_id !== userId) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
     const { data: messages, error: messagesError } = await supabase
       .from('messages')
-      .select('id, role, content, sources, created_at')
+      .select('id, role, content, sources, charts, created_at')
       .eq('conversation_id', conversationId)
       .order('created_at', { ascending: true });
 

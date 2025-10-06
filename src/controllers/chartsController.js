@@ -1,47 +1,113 @@
 // src/controllers/chartsController.js
+import { createClient } from "@supabase/supabase-js";
 import { generateCharts } from "../helpers/charts.js";
-import { generateContent, extractTextFromUploads, extractImagesFromUploads } from "../helpers/gemini.js";
+import { generateContent } from "../helpers/gemini.js";
+import env from "../config/env.js";
+
+const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY);
+
+function normalizeConversationId(rawId) {
+  if (!rawId) return null;
+  const value = typeof rawId === "string" ? rawId.trim() : rawId;
+  if (!value || value === "null" || value === "undefined") {
+    return null;
+  }
+  return value;
+}
+
+async function verifyConversationOwnership(conversationId, userId) {
+  if (!conversationId) {
+    return { conversationId: null };
+  }
+
+  try {
+    const { data: conversation, error } = await supabase
+      .from("conversations")
+      .select("id, user_id")
+      .eq("id", conversationId)
+      .single();
+
+    if (error || !conversation) {
+      return { error: "Conversation not found", status: 404 };
+    }
+
+    if (conversation.user_id && conversation.user_id !== userId) {
+      return { error: "Access denied", status: 403 };
+    }
+
+    return { conversationId: conversation.id };
+  } catch (err) {
+    console.error("Failed to verify conversation ownership:", err);
+    return { error: "Failed to verify conversation", status: 500 };
+  }
+}
+
+async function saveChartMessage({ conversationId, chartUrl, prompt }) {
+  if (!conversationId || !chartUrl) {
+    return;
+  }
+
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+    console.warn("Supabase credentials are missing; skipping chart persistence.");
+    return;
+  }
+
+  try {
+    const { data: existingMessages, error: fetchError } = await supabase
+      .from("messages")
+      .select("id, charts")
+      .eq("conversation_id", conversationId)
+      .eq("role", "model")
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (fetchError) {
+      console.error("Failed to fetch latest assistant message for chart attachment:", fetchError);
+      return;
+    }
+
+    const latestMessage = existingMessages?.[0];
+
+    if (!latestMessage) {
+      console.warn(
+        "No assistant message found to attach chart; skipping persistence for conversation",
+        conversationId
+      );
+      return;
+    }
+
+    const shouldSkipUpdate = latestMessage.charts && latestMessage.charts === chartUrl;
+    if (shouldSkipUpdate) {
+      return;
+    }
+
+    const { error: updateMessageError } = await supabase
+      .from("messages")
+      .update({ charts: chartUrl })
+      .eq("id", latestMessage.id);
+
+    if (updateMessageError) {
+      console.error("Failed to update existing message with chart:", updateMessageError);
+      return;
+    }
+
+    const { error: updateError } = await supabase
+      .from("conversations")
+      .update({ updated_at: new Date().toISOString() })
+      .eq("id", conversationId);
+
+    if (updateError) {
+      console.error("Failed to update conversation timestamp:", updateError);
+    }
+  } catch (error) {
+    console.error("Failed to save chart message:", error);
+  }
+}
 
 // Return only the charts JSON (non-stream)
 export async function handleChartsGenerate(req, res) {
   try {
-    const { prompt } = req.body || {};
-    let { options } = req.body || {};
-    if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
-      return res.status(400).json({ error: "Prompt is required" });
-    }
-    if (options && typeof options === 'string') {
-      try { options = JSON.parse(options); } catch { options = {}; }
-    }
-    options = options || {};
-
-    const uploads = Array.isArray(req.files) ? req.files : [];
-    const includeSearch = typeof options.includeSearch === 'boolean' ? options.includeSearch : (uploads.length === 0);
-
-    const result = await generateCharts(prompt, req.userId, { uploads, includeSearch });
-
-    if (!result.ok) {
-      return res.status(500).json({
-        ok: false,
-        error: result.error || 'Failed to generate chart',
-        processingTime: result.processingTime || null,
-      });
-    }
-
-    return res.json({
-      chartUrl: result.chartUrl,
-      quickChartSuccess: result.quickChartSuccess,
-    });
-  } catch (error) {
-    console.error('Error in handleChartsGenerate:', error);
-    res.status(500).json({ error: error.message });
-  }
-}
-
-
-export async function handleChatWithChartsParallel(req, res) {
-  try {
-    const { prompt, conversationId } = req.body || {};
+    const { prompt, conversationId: rawConversationId } = req.body || {};
     let { options } = req.body || {};
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: "Prompt is required" });
@@ -54,6 +120,73 @@ export async function handleChatWithChartsParallel(req, res) {
     const uploads = Array.isArray(req.files) ? req.files : [];
     const includeSearch = typeof options.includeSearch === 'boolean' ? options.includeSearch : (uploads.length === 0);
     const userId = req.userId;
+    const conversationId = normalizeConversationId(rawConversationId);
+
+    const {
+      conversationId: validatedConversationId,
+      error: conversationError,
+      status: conversationStatus
+    } = await verifyConversationOwnership(conversationId, userId);
+
+    if (conversationError) {
+      return res.status(conversationStatus || 400).json({ error: conversationError });
+    }
+
+    const result = await generateCharts(prompt, req.userId, { uploads, includeSearch });
+
+    if (result.ok && validatedConversationId) {
+      await saveChartMessage({
+        conversationId: validatedConversationId,
+        chartUrl: result.chartUrl,
+        prompt,
+      });
+    }
+
+    if (!result.ok) {
+      return res.status(500).json({
+        ok: false,
+        error: result.error || 'Failed to generate chart',
+        processingTime: result.processingTime || null,
+      });
+    }
+
+    return res.json({
+      chartUrl: result.chartUrl,
+      quickChartSuccess: result.quickChartSuccess,
+      conversationId: validatedConversationId,
+    });
+  } catch (error) {
+    console.error('Error in handleChartsGenerate:', error);
+    res.status(500).json({ error: error.message });
+  }
+}
+
+export async function handleChatWithChartsParallel(req, res) {
+  try {
+    const { prompt, conversationId: rawConversationId } = req.body || {};
+    let { options } = req.body || {};
+    if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+      return res.status(400).json({ error: "Prompt is required" });
+    }
+    if (options && typeof options === 'string') {
+      try { options = JSON.parse(options); } catch { options = {}; }
+    }
+    options = options || {};
+
+    const uploads = Array.isArray(req.files) ? req.files : [];
+    const includeSearch = typeof options.includeSearch === 'boolean' ? options.includeSearch : (uploads.length === 0);
+    const userId = req.userId;
+    const conversationId = normalizeConversationId(rawConversationId);
+
+    const {
+      conversationId: validatedConversationId,
+      error: conversationError,
+      status: conversationStatus
+    } = await verifyConversationOwnership(conversationId, userId);
+
+    if (conversationError) {
+      return res.status(conversationStatus || 400).json({ error: conversationError });
+    }
 
     const [chatRes, chartsRes] = await Promise.allSettled([
       generateContent(prompt, userId, {
@@ -66,11 +199,43 @@ export async function handleChatWithChartsParallel(req, res) {
       generateCharts(prompt, userId, { includeSearch, uploads })
     ]);
 
-    const charts = chartsRes.status === 'fulfilled' ? chartsRes.value : { ok: false, error: chartsRes.reason?.message || 'Charts generation failed' };
+    const chat = chatRes.status === 'fulfilled'
+      ? {
+          content: chatRes.value?.content || null,
+          sources: Array.isArray(chatRes.value?.sources) ? chatRes.value.sources : [],
+          error: null,
+          metadata: {
+            attempts: chatRes.value?.attempts || null,
+            processingTime: chatRes.value?.processingTime || null,
+            timestamp: chatRes.value?.timestamp || null,
+          }
+        }
+      : {
+          content: null,
+          sources: [],
+          error: chatRes.reason?.message || 'Failed to generate chat',
+          metadata: null,
+        };
+
+    const charts = chartsRes.status === 'fulfilled'
+      ? chartsRes.value
+      : { ok: false, error: chartsRes.reason?.message || 'Charts generation failed' };
+
+    if (charts?.ok === true && validatedConversationId) {
+      await saveChartMessage({
+        conversationId: validatedConversationId,
+        chartUrl: charts.chartUrl,
+        prompt,
+      });
+    }
 
     return res.json({
+      conversationId: validatedConversationId,
+      chat,
       charts: {
-        chart: charts?.chart || null,
+        chartUrl: charts?.chartUrl || null,
+        chartConfig: charts?.chartConfig || null,
+        quickChartSuccess: charts?.quickChartSuccess === true,
         error: charts?.ok === true ? null : (charts?.error || 'Failed to generate charts')
       }
     });
