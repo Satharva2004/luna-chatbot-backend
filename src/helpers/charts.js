@@ -161,9 +161,9 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
     : '';
 
   // Log the raw response from Gemini for debugging
-  // console.log('=== Gemini Raw Response ===');
-  // console.log(text);
-  // console.log('==========================');
+  console.log('=== Gemini Raw Response ===');
+  console.log(text);
+  console.log('==========================');
 
   const parsed = tryParseJson(text.trim());
 
