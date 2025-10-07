@@ -42,6 +42,35 @@ async function verifyConversationOwnership(conversationId, userId) {
   }
 }
 
+async function fetchConversationHistory(conversationId) {
+  if (!conversationId) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("messages")
+    .select("role, content")
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  if (error) {
+    throw error;
+  }
+
+  return (data || [])
+    .reverse()
+    .filter((message) => typeof message?.content === "string" && message.content.trim().length > 0)
+    .map((message) => {
+      const normalizedRole = message.role === "assistant" ? "model" : message.role;
+      const role = normalizedRole === "model" ? "model" : "user";
+      return {
+        role,
+        parts: [{ text: message.content }],
+      };
+    });
+}
+
 async function saveChartMessage({ conversationId, chartUrl, prompt }) {
   if (!conversationId || !chartUrl) {
     return;
@@ -132,7 +161,19 @@ export async function handleChartsGenerate(req, res) {
       return res.status(conversationStatus || 400).json({ error: conversationError });
     }
 
-    const result = await generateCharts(prompt, req.userId, { uploads, includeSearch });
+    const shouldResetHistory = uploads.length > 0 && options.keepHistoryWithFiles !== true;
+
+    let chartHistory = [];
+    if (validatedConversationId && !shouldResetHistory) {
+      try {
+        chartHistory = await fetchConversationHistory(validatedConversationId);
+      } catch (historyError) {
+        console.error('Failed to fetch chart conversation history:', historyError);
+        return res.status(500).json({ error: 'Failed to fetch conversation history' });
+      }
+    }
+
+    const result = await generateCharts(prompt, req.userId, { uploads, includeSearch, history: chartHistory });
 
     if (result.ok && validatedConversationId) {
       await saveChartMessage({
@@ -188,15 +229,27 @@ export async function handleChatWithChartsParallel(req, res) {
       return res.status(conversationStatus || 400).json({ error: conversationError });
     }
 
+    const shouldResetHistory = uploads.length > 0 && options.keepHistoryWithFiles !== true;
+
+    let chartHistory = [];
+    if (validatedConversationId && !shouldResetHistory) {
+      try {
+        chartHistory = await fetchConversationHistory(validatedConversationId);
+      } catch (historyError) {
+        console.error('Failed to fetch chart conversation history:', historyError);
+        return res.status(500).json({ error: 'Failed to fetch conversation history' });
+      }
+    }
+
     const [chatRes, chartsRes] = await Promise.allSettled([
       generateContent(prompt, userId, {
         includeSearch,
         uploads,
-        resetHistory: uploads.length > 0 && options.keepHistoryWithFiles !== true,
+        resetHistory: shouldResetHistory,
         expert: options.expert,
         systemPrompt: options.systemPrompt
       }),
-      generateCharts(prompt, userId, { includeSearch, uploads })
+      generateCharts(prompt, userId, { includeSearch, uploads, history: chartHistory })
     ]);
 
     const chat = chatRes.status === 'fulfilled'

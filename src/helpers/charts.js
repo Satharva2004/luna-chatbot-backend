@@ -6,6 +6,7 @@ import { buildRequestBody, BASE_URL, MODEL_ID, extractTextFromUploads, extractIm
 
 const GENERATE_CONTENT_API = "generateContent";
 const QUICKCHART_API_URL = "https://quickchart.io/chart/create";
+const MAX_HISTORY_MESSAGES = 10;
 
 async function callQuickChartAPI(chartConfig) {
   try {
@@ -121,6 +122,7 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
   const start = Date.now();
   const uploads = Array.isArray(options.uploads) ? options.uploads : [];
   const includeSearch = typeof options.includeSearch === 'boolean' ? options.includeSearch : (uploads.length === 0);
+  const history = Array.isArray(options.history) ? options.history : [];
 
   // Compose user message with uploads (same behavior as chat helper)
   let composedText = String(prompt || '');
@@ -133,7 +135,11 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
     parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
   }
 
-  const messages = [{ role: 'user', parts }];
+  const trimmedHistory = history
+    .filter((message) => message && typeof message === 'object' && Array.isArray(message.parts))
+    .slice(-MAX_HISTORY_MESSAGES);
+
+  const messages = [...trimmedHistory, { role: 'user', parts }];
   const body = buildRequestBody(messages, CHARTS_PROMPT, includeSearch);
 
   const url = `${BASE_URL}/${MODEL_ID}:${GENERATE_CONTENT_API}?key=${env.GEMINI_API_KEY}`;
