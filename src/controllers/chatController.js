@@ -2,6 +2,7 @@
 import fetch from 'node-fetch';
 import { createClient } from '@supabase/supabase-js';
 import { generateContent, buildRequestBody, MODEL_ID, BASE_URL, extractTextFromUploads, extractImagesFromUploads } from '../helpers/gemini.js';
+import { searchImages } from '../helpers/imageSearch.js';
 import { RESEARCH_ASSISTANT_PROMPT } from '../prompts/researchAssistantPrompt.js';
 import env from '../config/env.js';
 
@@ -101,8 +102,11 @@ export async function handleChatGenerate(req, res) {
       // Reset history when new files arrive unless explicitly kept
       resetHistory: uploads.length > 0 && options.keepHistoryWithFiles !== true
     });
-    
-    // Save both user message and AI response to database
+
+    const processingTime = Date.now() - start;
+    const includeImageSearch = options.includeImageSearch !== false;
+    const imageResults = includeImageSearch ? await searchImages(prompt) : [];
+
     const aiContent = response?.content || response?.text || '';
     const aiSources = Array.isArray(response?.sources) ? response.sources : [];
 
@@ -113,16 +117,18 @@ export async function handleChatGenerate(req, res) {
           conversation_id: currentConversationId,
           role: 'user',
           content: prompt,
-          sources: []
+          sources: [],
+          images: null
         },
         {
           conversation_id: currentConversationId,
           role: 'model',
           content: aiContent,
-          sources: aiSources
+          sources: aiSources,
+          images: imageResults.length > 0 ? imageResults : null
         }
       ]);
-      
+
     if (saveError) {
       console.error('Error saving messages:', saveError);
       // Don't fail the request, just log the error
@@ -134,10 +140,10 @@ export async function handleChatGenerate(req, res) {
       .update({ updated_at: new Date().toISOString() })
       .eq('id', currentConversationId);
 
-    const processingTime = Date.now() - start;
     const apiResponse = {
       content: aiContent,
       sources: aiSources,
+      images: imageResults,
       timestamp: new Date().toISOString(),
       processingTime,
       attempts: response?.attempts || 1,
@@ -257,10 +263,14 @@ export async function handleChatStreamGenerate(req, res) {
     // Default includeSearch to false when files exist unless explicitly overridden
     const files = Array.isArray(req.files) ? req.files : [];
     const includeSearch = typeof options.includeSearch === 'boolean' ? options.includeSearch : (files.length === 0);
+    const includeImageSearch = options.includeImageSearch !== false;
     const systemPrompt = options.systemPrompt || RESEARCH_ASSISTANT_PROMPT({ username });
 
     const body = buildRequestBody(chatHistory.slice(-10), systemPrompt, includeSearch);
     const url = `${BASE_URL}/${MODEL_ID}:streamGenerateContent?alt=sse&key=${env.GEMINI_API_KEY}`;
+
+    const imageResultsPromise = includeImageSearch ? searchImages(prompt) : Promise.resolve([]);
+    const imageResults = await imageResultsPromise;
 
     // Prepare SSE response
     res.setHeader("Content-Type", "text/event-stream");
@@ -271,6 +281,11 @@ export async function handleChatStreamGenerate(req, res) {
     // Send conversation ID immediately
     res.write(`event: conversationId\n`);
     res.write(`data: ${JSON.stringify({ conversationId: currentConversationId })}\n\n`);
+
+    if (imageResults.length > 0) {
+      res.write(`event: images\n`);
+      res.write(`data: ${JSON.stringify({ images: imageResults })}\n\n`);
+    }
 
     const upstream = await fetch(url, {
       method: "POST",
@@ -392,7 +407,7 @@ export async function handleChatStreamGenerate(req, res) {
       
       // Save messages to database after streaming completes WITH SOURCES
       try {
-        const { error: saveError } = await supabase
+        const { data: insertedStreamMessages, error: saveError } = await supabase
           .from('messages')
           .insert([
             {
@@ -405,7 +420,8 @@ export async function handleChatStreamGenerate(req, res) {
               conversation_id: currentConversationId,
               role: 'model',
               content: streamedContent,
-              sources: finalSourcesWithTitles // NOW SAVING SOURCES!
+              sources: finalSourcesWithTitles, // NOW SAVING SOURCES!
+              images: imageResults
             }
           ]);
           
@@ -514,7 +530,7 @@ export async function getConversationHistory(req, res) {
 
     const { data: messages, error: messagesError } = await supabase
       .from('messages')
-      .select('id, role, content, sources, charts, created_at')
+      .select('id, role, content, sources, charts, images, created_at')
       .eq('conversation_id', conversationId)
       .order('created_at', { ascending: true });
 
