@@ -63,6 +63,47 @@ async function fetchPageTitle(url) {
   }
 }
 
+function buildContextualSearchQuery({ prompt, history, extra, maxLength = 200 }) {
+  const trimmedPrompt = typeof prompt === 'string' ? prompt.trim() : '';
+  const extraText = typeof extra === 'string' ? extra.trim() : '';
+  const userSnippets = [];
+  const assistantSnippets = [];
+  if (Array.isArray(history) && history.length) {
+    const chronological = [...history].reverse();
+    for (let i = chronological.length - 1; i >= 0; i -= 1) {
+      const message = chronological[i];
+      const text = typeof message?.content === 'string' ? message.content.trim() : '';
+      if (!text) {
+        continue;
+      }
+      if (message.role === 'user' && userSnippets.length < 2) {
+        userSnippets.push(text);
+      } else if (message.role === 'model' && assistantSnippets.length < 1) {
+        assistantSnippets.push(text);
+      }
+      if (userSnippets.length >= 2 && assistantSnippets.length >= 1) {
+        break;
+      }
+    }
+  }
+  const segments = [];
+  segments.push(...userSnippets.reverse(), ...assistantSnippets.reverse());
+  if (extraText) {
+    segments.push(extraText);
+  }
+  if (trimmedPrompt) {
+    segments.push(trimmedPrompt);
+  }
+  const normalized = segments
+    .map((segment) => segment.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (!normalized.length) {
+    return '';
+  }
+  const combined = normalized.join(' | ');
+  return combined.length > maxLength ? combined.slice(0, maxLength) : combined;
+}
+
 /**
  * Search YouTube videos using MCP
  * @param {string} query - Search query
@@ -149,7 +190,7 @@ export async function handleChatGenerate(req, res) {
     // Get last 10 messages for context
     const { data: messages, error: historyError } = await supabase
       .from('messages')
-      .select('role, content')
+      .select('role, content, sources, images, videos')
       .eq('conversation_id', currentConversationId)
       .order('created_at', { ascending: false })
       .limit(10);
@@ -189,7 +230,10 @@ export async function handleChatGenerate(req, res) {
 
     const processingTime = Date.now() - start;
     const includeImageSearch = options.includeImageSearch !== false;
-    const imageResults = includeImageSearch ? await searchImages(prompt) : [];
+    const contextualImageQuery = buildContextualSearchQuery({ prompt, history: messages });
+    const imageResults = includeImageSearch && contextualImageQuery
+      ? await searchImages(contextualImageQuery)
+      : [];
 
     const aiContent = response?.content || response?.text || '';
     const aiSources = Array.isArray(response?.sources) ? response.sources : [];
@@ -302,7 +346,7 @@ export async function handleChatStreamGenerate(req, res) {
     // Get conversation history for context
     const { data: messages, error: historyError } = await supabase
       .from('messages')
-      .select('role, content')
+      .select('role, content, sources, images, videos')
       .eq('conversation_id', currentConversationId)
       .order('created_at', { ascending: false })
       .limit(10);
@@ -321,13 +365,15 @@ export async function handleChatStreamGenerate(req, res) {
     // If uploads provided via multipart/form-data, include their extracted text and images
     let composedText = String(prompt);
     let imageParts = [];
+    let uploadedText = '';
     try {
       const files = Array.isArray(req.files) ? req.files : [];
       if (files.length) {
-        const uploadedText = await extractTextFromUploads(files);
+        const extractedText = await extractTextFromUploads(files);
         const uploadedImages = await extractImagesFromUploads(files);
-        if (uploadedText) {
-          composedText += `\n\n--- Uploaded Files Text ---\n${uploadedText}`;
+        if (extractedText) {
+          uploadedText = extractedText;
+          composedText += `\n\n--- Uploaded Files Text ---\n${extractedText}`;
         }
         if (uploadedImages.length) {
           imageParts = uploadedImages.map(img => ({ inlineData: { mimeType: img.mimeType, data: img.data } }));
@@ -350,13 +396,19 @@ export async function handleChatStreamGenerate(req, res) {
     const includeImageSearch = options.includeImageSearch !== false;
     const includeYouTube = options.includeYouTube === true; // Opt-in for YouTube search
     const systemPrompt = options.systemPrompt || RESEARCH_ASSISTANT_PROMPT({ username });
+    const uploadContext = uploadedText ? uploadedText.slice(0, 400) : '';
+    const contextualSearchQuery = buildContextualSearchQuery({ prompt, history: messages, extra: uploadContext });
 
     const body = buildRequestBody(chatHistory.slice(-10), systemPrompt, includeSearch);
     const url = `${BASE_URL}/${MODEL_ID}:streamGenerateContent?alt=sse&key=${env.GEMINI_API_KEY}`;
 
     // Parallel search for images and YouTube videos
-    const imageResultsPromise = includeImageSearch ? searchImages(prompt) : Promise.resolve([]);
-    const youtubeResultsPromise = includeYouTube ? searchYouTubeVideos(prompt, userId) : Promise.resolve(null);
+    const imageResultsPromise = includeImageSearch && contextualSearchQuery
+      ? searchImages(contextualSearchQuery)
+      : Promise.resolve([]);
+    const youtubeResultsPromise = includeYouTube && contextualSearchQuery
+      ? searchYouTubeVideos(contextualSearchQuery, userId)
+      : Promise.resolve(null);
     
     const [imageResults, youtubeResultsPayload] = await Promise.all([imageResultsPromise, youtubeResultsPromise]);
     const youtubeVideos = Array.isArray(youtubeResultsPayload?.results)
