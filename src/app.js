@@ -6,9 +6,11 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import geminiRouter from "./routers/geminiRouter.js";
 import userRouter from "./routers/userRouter.js";
+import chatRouter from "./routers/chatRouter.js"; 
 import speechRouter from "./routers/speechRouter.js";
 import { createUploadsDir } from "./utils/fileUpload.js";
 import uploadRouter from "./routers/uploadRouter.js";
+import youtubeRouter from "./routers/youtubeRouter.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -92,6 +94,8 @@ app.use("/api/gemini", geminiRouter);
 app.use("/api/users", userRouter);
 app.use("/api/speech", speechRouter);
 app.use("/api", uploadRouter); // exposes POST /api/upload
+app.use("/api/youtube", youtubeRouter); // MCP (Model Context Protocol) endpoints
+app.use("/api/chat", chatRouter); // Chat endpoints
 
 // Health check
 app.get("/", (req, res) => {

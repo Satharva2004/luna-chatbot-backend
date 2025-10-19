@@ -4,9 +4,93 @@ import { createClient } from '@supabase/supabase-js';
 import { generateContent, buildRequestBody, MODEL_ID, BASE_URL, extractTextFromUploads, extractImagesFromUploads } from '../helpers/gemini.js';
 import { searchImages } from '../helpers/imageSearch.js';
 import { RESEARCH_ASSISTANT_PROMPT } from '../prompts/researchAssistantPrompt.js';
+import YouTubeMCP from '../helpers/youtubeSearch.js';
 import env from '../config/env.js';
 
 const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY);
+
+// Initialize YouTube MCP
+const youtubeMCP = new YouTubeMCP(env.YOUTUBE_API_KEY);
+
+/**
+ * Fetch page title from URL
+ * @param {string} url - The URL to fetch title from
+ * @returns {Promise<string>} - The page title or fallback
+ */
+async function fetchPageTitle(url) {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const html = await response.text();
+    const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+    let title = titleMatch ? titleMatch[1].trim() : '';
+
+    if (title) {
+      title = title.replace(/\s+/g, ' ').trim();
+      if (title.length > 100) {
+        title = title.substring(0, 97) + '...';
+      }
+    }
+
+    if (!title) {
+      const urlObj = new URL(url);
+      title = urlObj.hostname.replace(/^www\./, '');
+    }
+
+    return title;
+  } catch (error) {
+    try {
+      const urlObj = new URL(url);
+      return urlObj.hostname.replace(/^www\./, '');
+    } catch (e) {
+      return 'Link';
+    }
+  }
+}
+
+/**
+ * Search YouTube videos using MCP
+ * @param {string} query - Search query
+ * @param {string} userId - User ID for rate limiting
+ * @returns {Promise<Array>} - Array of video results
+ */
+async function searchYouTubeVideos(query, userId) {
+  try {
+    console.log('[YouTube MCP] Searching for:', query);
+    const result = await youtubeMCP.search({
+      query,
+      maxResults: 5,
+      order: 'relevance',
+      userId
+    });
+
+    if (result.success && result.results) {
+      console.log(`[YouTube MCP] Found ${result.results.length} videos`);
+      return result.results;
+    }
+
+    return [];
+  } catch (error) {
+    console.error('[YouTube MCP] Search failed:', error.message);
+    // Don't fail the entire request if YouTube search fails
+    return [];
+  }
+}
 
 // Generate chat response and store in conversation
 export async function handleChatGenerate(req, res) {
@@ -264,13 +348,20 @@ export async function handleChatStreamGenerate(req, res) {
     const files = Array.isArray(req.files) ? req.files : [];
     const includeSearch = typeof options.includeSearch === 'boolean' ? options.includeSearch : (files.length === 0);
     const includeImageSearch = options.includeImageSearch !== false;
+    const includeYouTube = options.includeYouTube === true; // Opt-in for YouTube search
     const systemPrompt = options.systemPrompt || RESEARCH_ASSISTANT_PROMPT({ username });
 
     const body = buildRequestBody(chatHistory.slice(-10), systemPrompt, includeSearch);
     const url = `${BASE_URL}/${MODEL_ID}:streamGenerateContent?alt=sse&key=${env.GEMINI_API_KEY}`;
 
+    // Parallel search for images and YouTube videos
     const imageResultsPromise = includeImageSearch ? searchImages(prompt) : Promise.resolve([]);
-    const imageResults = await imageResultsPromise;
+    const youtubeResultsPromise = includeYouTube ? searchYouTubeVideos(prompt, userId) : Promise.resolve(null);
+    
+    const [imageResults, youtubeResultsPayload] = await Promise.all([imageResultsPromise, youtubeResultsPromise]);
+    const youtubeVideos = Array.isArray(youtubeResultsPayload?.results)
+      ? youtubeResultsPayload.results
+      : (Array.isArray(youtubeResultsPayload) ? youtubeResultsPayload : []);
 
     // Prepare SSE response
     res.setHeader("Content-Type", "text/event-stream");
@@ -285,6 +376,11 @@ export async function handleChatStreamGenerate(req, res) {
     if (imageResults.length > 0) {
       res.write(`event: images\n`);
       res.write(`data: ${JSON.stringify({ images: imageResults })}\n\n`);
+    }
+
+    if (youtubeVideos.length > 0) {
+      res.write(`event: youtubeResults\n`);
+      res.write(`data: ${JSON.stringify({ videos: youtubeVideos })}\n\n`);
     }
 
     const upstream = await fetch(url, {
@@ -421,7 +517,8 @@ export async function handleChatStreamGenerate(req, res) {
               role: 'model',
               content: streamedContent,
               sources: finalSourcesWithTitles, // NOW SAVING SOURCES!
-              images: imageResults
+              images: imageResults,
+              videos: youtubeVideos.length > 0 ? youtubeVideos : null
             }
           ]);
           
@@ -530,7 +627,7 @@ export async function getConversationHistory(req, res) {
 
     const { data: messages, error: messagesError } = await supabase
       .from('messages')
-      .select('id, role, content, sources, charts, images, created_at')
+      .select('id, role, content, sources, charts, images, videos, created_at')
       .eq('conversation_id', conversationId)
       .order('created_at', { ascending: true });
 
