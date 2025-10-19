@@ -411,9 +411,11 @@ export async function handleChatStreamGenerate(req, res) {
       : Promise.resolve(null);
     
     const [imageResults, youtubeResultsPayload] = await Promise.all([imageResultsPromise, youtubeResultsPromise]);
-    const youtubeVideos = Array.isArray(youtubeResultsPayload?.results)
-      ? youtubeResultsPayload.results
-      : (Array.isArray(youtubeResultsPayload) ? youtubeResultsPayload : []);
+    const youtubeVideos = Array.isArray(youtubeResultsPayload)
+      ? youtubeResultsPayload
+      : Array.isArray(youtubeResultsPayload?.results)
+        ? youtubeResultsPayload.results
+        : [];
 
     // Prepare SSE response
     res.setHeader("Content-Type", "text/event-stream");

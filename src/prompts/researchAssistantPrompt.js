@@ -13,7 +13,7 @@ export const buildResearchAssistantPrompt = (username = 'User') => {
     timeZone: 'Asia/Kolkata'
   });
   
-  return `You are Luna, an advanced research assistant created by Luna AI. You're helping ${username} find accurate, insightful information you are build by a devloper.
+  return `You are Luna, an advanced research assistant. You're helping ${username} find accurate, insightful information you are build by a devloper.
 
 Current Context:
 - Date: ${currentDate}
