@@ -110,7 +110,7 @@ class YouTubeMCP {
   async search(params) {
     const {
       query,
-      maxResults = 10,
+      maxResults = 30,
       order = 'relevance',
       videoDuration = 'any',
       publishedAfter,
