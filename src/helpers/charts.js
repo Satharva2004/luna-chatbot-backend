@@ -95,27 +95,88 @@ function tryParseJson(text) {
   return { ok: false, error: "Invalid JSON from model" };
 }
 
+function extractChartConfig(config) {
+  if (!config || typeof config !== 'object') {
+    return null;
+  }
+
+  if (config.chart && typeof config.chart === 'object') {
+    return config.chart;
+  }
+
+  return config;
+}
+
 function validateChartConfig(config) {
-  // Validate the chart config has required structure
-  if (!config || typeof config !== 'object') return false;
-  if (!config.chart || typeof config.chart !== 'object') return false;
-  if (!config.chart.data || typeof config.chart.data !== 'object') return false;
-  if (!Array.isArray(config.chart.data.datasets)) return false;
-  
-  // Validate all datasets have data arrays with values
-  for (const dataset of config.chart.data.datasets) {
+  const chart = extractChartConfig(config);
+  if (!chart || typeof chart !== 'object') {
+    return false;
+  }
+
+  if (!chart.type || typeof chart.type !== 'string') {
+    return false;
+  }
+
+  if (!chart.data || typeof chart.data !== 'object') {
+    return false;
+  }
+
+  const { labels, datasets } = chart.data;
+
+  if (!Array.isArray(datasets) || datasets.length === 0) {
+    return false;
+  }
+
+  if (labels && !Array.isArray(labels)) {
+    return false;
+  }
+
+  for (const dataset of datasets) {
     if (!Array.isArray(dataset.data) || dataset.data.length === 0) {
       return false;
     }
-    // Check for invalid values
     for (const val of dataset.data) {
-      if (typeof val !== 'number' || isNaN(val)) {
+      if (typeof val !== 'number' || Number.isNaN(val)) {
         return false;
       }
     }
+    if (labels && dataset.data.length !== labels.length) {
+      return false;
+    }
   }
-  
+
   return true;
+}
+
+function normalizeChartPayload(config) {
+  if (!config || typeof config !== 'object') {
+    return null;
+  }
+
+  if (config.chart && typeof config.chart === 'object') {
+    return config;
+  }
+
+  const {
+    width,
+    height,
+    backgroundColor,
+    devicePixelRatio,
+    format,
+    version,
+    ...chartConfig
+  } = config;
+
+  const payload = { chart: chartConfig };
+
+  if (typeof version !== 'undefined') payload.version = version;
+  if (typeof width !== 'undefined') payload.width = width;
+  if (typeof height !== 'undefined') payload.height = height;
+  if (typeof backgroundColor !== 'undefined') payload.backgroundColor = backgroundColor;
+  if (typeof devicePixelRatio !== 'undefined') payload.devicePixelRatio = devicePixelRatio;
+  if (typeof format !== 'undefined') payload.format = format;
+
+  return payload;
 }
 
 export async function generateCharts(prompt, userId = 'default', options = {}) {
@@ -174,13 +235,27 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
   const parsed = tryParseJson(text.trim());
 
   if (parsed.ok) {
+    const quickChartPayload = normalizeChartPayload(parsed.value);
+
+    if (!quickChartPayload) {
+      return {
+        ok: false,
+        chartConfig: null,
+        chartUrl: null,
+        quickChartSuccess: false,
+        raw: text,
+        error: 'Model returned an invalid chart configuration',
+        processingTime: Date.now() - start
+      };
+    }
+
     // Call QuickChart API with the generated JSON
-    const quickChartResult = await callQuickChartAPI(parsed.value);
+    const quickChartResult = await callQuickChartAPI(quickChartPayload);
     
     if (!quickChartResult.success || !quickChartResult.url) {
       return {
         ok: false,
-        chartConfig: parsed.value,
+        chartConfig: quickChartPayload.chart,
         chartUrl: null,
         quickChartSuccess: false,
         raw: text,
@@ -191,7 +266,7 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
 
     return {
       ok: true,
-      chartConfig: parsed.value,
+      chartConfig: quickChartPayload.chart,
       chartUrl: quickChartResult.url,
       quickChartSuccess: true,
       raw: text,

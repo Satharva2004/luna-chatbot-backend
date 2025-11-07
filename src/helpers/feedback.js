@@ -41,13 +41,6 @@ export async function createFeedbackEntry(input) {
         throw validationError("Title and message are required");
     }
 
-    const normalizedRating = typeof rating === "number" ? Math.round(rating) : null;
-    if (normalizedRating !== null && (normalizedRating < 1 || normalizedRating > 5)) {
-        throw validationError("Rating must be between 1 and 5");
-    }
-
-    
-
     const payload = {
         title: title.trim(),
         message: message.trim(),
@@ -56,7 +49,7 @@ export async function createFeedbackEntry(input) {
         user_id: userId ?? null,
         conversation_id: conversationId ?? null,
         email: email ?? null,
-        image_url: image ?? null,
+        image_url: image ?? null
     };
 
     const { data, error } = await supabase.from("feedback").insert(payload).select().single();
