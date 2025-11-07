@@ -205,6 +205,7 @@ export const googleAuth = async (req, res) => {
 
     const email = payload.email;
     const displayName = payload.name?.trim() || email.split('@')[0];
+    const profileImageUrl = typeof payload.picture === 'string' ? payload.picture : null;
 
     const { data: existingUser, error: existingUserError } = await supabase
       .from('users')
@@ -250,14 +251,25 @@ export const googleAuth = async (req, res) => {
     const token = generateToken(userRecord.id);
     const { password_hash: _passwordHash, ...userWithoutPassword } = userRecord;
 
+    const normalizedUser = {
+      ...userWithoutPassword,
+      username: userWithoutPassword.username ?? displayName,
+    };
+
+    if (displayName && !normalizedUser.name) {
+      normalizedUser.name = displayName;
+    }
+
+    if (profileImageUrl) {
+      normalizedUser.profileImageUrl = profileImageUrl;
+      normalizedUser.avatarUrl = profileImageUrl;
+    }
+
     res.status(200).json({
       status: 'success',
       token,
       data: {
-        user: {
-          ...userWithoutPassword,
-          username: userWithoutPassword.username ?? displayName,
-        },
+        user: normalizedUser,
       },
     });
   } catch (error) {
