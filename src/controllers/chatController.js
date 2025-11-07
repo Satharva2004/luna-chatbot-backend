@@ -10,7 +10,10 @@ import env from '../config/env.js';
 const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY);
 
 // Initialize YouTube MCP
-const youtubeMCP = new YouTubeMCP(env.YOUTUBE_API_KEY);
+const youtubeMCP = env.YOUTUBE_API_KEY ? new YouTubeMCP(env.YOUTUBE_API_KEY) : null;
+if (!youtubeMCP) {
+  console.warn('⚠️  YouTube API key not configured - YouTube search will be disabled');
+}
 
 /**
  * Fetch page title from URL
@@ -111,6 +114,11 @@ function buildContextualSearchQuery({ prompt, history, extra, maxLength = 200 })
  * @returns {Promise<Array>} - Array of video results
  */
 async function searchYouTubeVideos(query, userId) {
+  if (!youtubeMCP) {
+    console.log('[YouTube MCP] YouTube search disabled - no API key configured');
+    return [];
+  }
+  
   try {
     console.log('[YouTube MCP] Searching for:', query);
     const result = await youtubeMCP.search({
@@ -403,6 +411,7 @@ export async function handleChatStreamGenerate(req, res) {
     const url = `${BASE_URL}/${MODEL_ID}:streamGenerateContent?alt=sse&key=${env.GEMINI_API_KEY}`;
 
     // Parallel search for images and YouTube videos
+    console.log('[chatStream] includeYouTube:', includeYouTube, 'contextualSearchQuery:', contextualSearchQuery);
     const imageResultsPromise = includeImageSearch && contextualSearchQuery
       ? searchImages(contextualSearchQuery)
       : Promise.resolve([]);
@@ -411,11 +420,13 @@ export async function handleChatStreamGenerate(req, res) {
       : Promise.resolve(null);
     
     const [imageResults, youtubeResultsPayload] = await Promise.all([imageResultsPromise, youtubeResultsPromise]);
+    console.log('[chatStream] youtubeResultsPayload:', youtubeResultsPayload);
     const youtubeVideos = Array.isArray(youtubeResultsPayload)
       ? youtubeResultsPayload
       : Array.isArray(youtubeResultsPayload?.results)
         ? youtubeResultsPayload.results
         : [];
+    console.log('[chatStream] youtubeVideos count:', youtubeVideos.length);
 
     // Prepare SSE response
     res.setHeader("Content-Type", "text/event-stream");
