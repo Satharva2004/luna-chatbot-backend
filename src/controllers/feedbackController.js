@@ -13,7 +13,6 @@ export async function createFeedback(req, res) {
 export async function getFeedback(req, res) {
     try {
         const filters = {
-            category: req.query.category,
             userId: req.query.userId,
             sessionId: req.query.sessionId,
             conversationId: req.query.conversationId,

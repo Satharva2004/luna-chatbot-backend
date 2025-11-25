@@ -25,31 +25,47 @@ function validationError(message) {
     return error;
 }
 
+function normalizeUuidOrNull(value) {
+    if (!value) return null;
+    const str = String(value).trim();
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    return uuidRegex.test(str) ? str : null;
+}
+
 export async function createFeedbackEntry(input) {
     const {
         title,
         message,
-        category = "general",
         url,
+        sourceUrl,
         userId,
         conversationId,
         email,
         image
     } = input ?? {};
 
-    if (!title?.trim() || !message?.trim()) {
-        throw validationError("Title and message are required");
+    if (!title?.trim()) {
+        throw validationError("Title is required");
     }
+
+    const cleanedMessage = typeof message === "string" && message.trim().length > 0 ? message.trim() : null;
+    const rawUrl = typeof sourceUrl === "string" && sourceUrl.trim().length > 0
+        ? sourceUrl
+        : typeof url === "string" && url.trim().length > 0
+            ? url
+            : null;
+
+    const userUuid = normalizeUuidOrNull(userId);
+    const conversationUuid = normalizeUuidOrNull(conversationId);
 
     const payload = {
         title: title.trim(),
-        message: message.trim(),
-        category,
-        source_url: url ?? null,
-        user_id: userId ?? null,
-        conversation_id: conversationId ?? null,
+        message: cleanedMessage,
+        source_url: rawUrl,
         email: email ?? null,
-        image_url: image ?? null
+        image_url: image ?? null,
+        ...(userUuid ? { user_id: userUuid } : {}),
+        ...(conversationUuid ? { conversation_id: conversationUuid } : {}),
     };
 
     const { data, error } = await supabase.from("feedback").insert(payload).select().single();
@@ -64,7 +80,6 @@ export async function createFeedbackEntry(input) {
 
 export async function listFeedbackEntries(filters = {}) {
     const {
-        category,
         userId,
         sessionId,
         conversationId,
@@ -75,9 +90,6 @@ export async function listFeedbackEntries(filters = {}) {
 
     let query = supabase.from("feedback").select("*").order("created_at", { ascending: false });
 
-    if (category) {
-        query = query.eq("category", category);
-    }
     if (userId) {
         query = query.eq("user_id", userId);
     }
@@ -97,7 +109,7 @@ export async function listFeedbackEntries(filters = {}) {
         dbError.statusCode = 500;
         throw dbError;
     }
-
+    console.log(data);
     return data ?? [];
 }
 

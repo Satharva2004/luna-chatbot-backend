@@ -2,11 +2,67 @@
 import fetch from "node-fetch";
 import env from "../config/env.js";
 import { CHARTS_PROMPT } from "../prompts/charts.js";
-import { buildRequestBody, BASE_URL, MODEL_ID, extractTextFromUploads, extractImagesFromUploads } from "./gemini.js";
+import { extractTextFromUploads, extractImagesFromUploads } from "./gemini.js";
+import { GoogleGenAI } from "@google/genai";
+import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
-const GENERATE_CONTENT_API = "generateContent";
 const QUICKCHART_API_URL = "https://quickchart.io/chart/create";
 const MAX_HISTORY_MESSAGES = 10;
+const ai = new GoogleGenAI({
+  apiKey: env.GEMINI_API_KEY,
+});
+
+const datasetSchema = z.object({
+  label: z.string().optional(),
+  data: z.array(z.number()).nonempty(),
+}).passthrough();
+
+const chartConfigSchema = z.object({
+  type: z.string(),
+  data: z.object({
+    labels: z.array(z.string()).optional(),
+    datasets: z.array(datasetSchema).nonempty(),
+  }),
+  options: z.object({
+    plugins: z.record(z.any()).optional(),
+  }).passthrough().optional(),
+}).passthrough();
+
+const chartPayloadSchema = z.object({
+  width: z.string(),
+  height: z.string(),
+  devicePixelRatio: z.number(),
+  format: z.enum(["png", "svg", "webp"]).optional(),
+  backgroundColor: z.string().optional(),
+  version: z.string().optional(),
+  key: z.string().optional(),
+  chart: chartConfigSchema,
+});
+
+// Simpler schema for Gemini's responseJsonSchema to avoid excessive nesting depth
+// Still enforces that chart.type exists and chart.data.datasets contains numbers.
+const geminiResponseSchema = z.object({
+  width: z.string(),
+  height: z.string(),
+  devicePixelRatio: z.number(),
+  format: z.enum(["png", "svg", "webp"]).optional(),
+  backgroundColor: z.string().optional(),
+  version: z.string().optional(),
+  key: z.string().optional(),
+  chart: z.object({
+    type: z.string(),
+    data: z.object({
+      labels: z.array(z.string()).optional(),
+      datasets: z.array(
+        z.object({
+          label: z.string().optional(),
+          data: z.array(z.number()).nonempty(),
+        }).passthrough()
+      ).nonempty(),
+    }),
+  }).passthrough(),
+});
 
 async function callQuickChartAPI(chartConfig) {
   try {
@@ -42,150 +98,12 @@ async function callQuickChartAPI(chartConfig) {
   }
 }
 
-function tryParseJson(text) {
-  if (!text || typeof text !== 'string') {
-    return { ok: false, error: "Empty response from model" };
-  }
-
-  let t = text.trim();
-
-  // 1) Strip Markdown fences ```json ... ``` or ``` ... ```
-  const fenceRe = /```(?:json|javascript)?\s*([\s\S]*?)```/i;
-  const fenced = t.match(fenceRe);
-  if (fenced && fenced[1]) {
-    t = fenced[1].trim();
-  }
-
-  // 2) Quick parse attempt
-  try {
-    const parsed = JSON.parse(t);
-    if (validateChartConfig(parsed)) {
-      return { ok: true, value: parsed };
-    }
-  } catch (_) {}
-
-  // 3) Extract first JSON object from text using first '{' and last '}'
-  const first = t.indexOf('{');
-  const last = t.lastIndexOf('}');
-  if (first !== -1 && last !== -1 && last > first) {
-    const candidate = t.slice(first, last + 1);
-    try {
-      const parsed = JSON.parse(candidate);
-      if (validateChartConfig(parsed)) {
-        return { ok: true, value: parsed };
-      }
-    } catch (_) {}
-  }
-
-  // 4) Fix common JSON issues
-  let fixed = t
-    .replace(/,\s*([}\]])/g, '$1')  // Remove trailing commas
-    .replace(/"data":\s*,/g, '"data": []')  // Fix empty data arrays
-    .replace(/:\s*,/g, ': null,')  // Fix missing values
-    .replace(/,\s*}/g, '}')  // Remove trailing commas before }
-    .replace(/,\s*]/g, ']');  // Remove trailing commas before ]
-
-  try {
-    const parsed = JSON.parse(fixed);
-    if (validateChartConfig(parsed)) {
-      return { ok: true, value: parsed };
-    }
-  } catch (_) {}
-
-  return { ok: false, error: "Invalid JSON from model" };
-}
-
-function extractChartConfig(config) {
-  if (!config || typeof config !== 'object') {
-    return null;
-  }
-
-  if (config.chart && typeof config.chart === 'object') {
-    return config.chart;
-  }
-
-  return config;
-}
-
-function validateChartConfig(config) {
-  const chart = extractChartConfig(config);
-  if (!chart || typeof chart !== 'object') {
-    return false;
-  }
-
-  if (!chart.type || typeof chart.type !== 'string') {
-    return false;
-  }
-
-  if (!chart.data || typeof chart.data !== 'object') {
-    return false;
-  }
-
-  const { labels, datasets } = chart.data;
-
-  if (!Array.isArray(datasets) || datasets.length === 0) {
-    return false;
-  }
-
-  if (labels && !Array.isArray(labels)) {
-    return false;
-  }
-
-  for (const dataset of datasets) {
-    if (!Array.isArray(dataset.data) || dataset.data.length === 0) {
-      return false;
-    }
-    for (const val of dataset.data) {
-      if (typeof val !== 'number' || Number.isNaN(val)) {
-        return false;
-      }
-    }
-    if (labels && dataset.data.length !== labels.length) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function normalizeChartPayload(config) {
-  if (!config || typeof config !== 'object') {
-    return null;
-  }
-
-  if (config.chart && typeof config.chart === 'object') {
-    return config;
-  }
-
-  const {
-    width,
-    height,
-    backgroundColor,
-    devicePixelRatio,
-    format,
-    version,
-    ...chartConfig
-  } = config;
-
-  const payload = { chart: chartConfig };
-
-  if (typeof version !== 'undefined') payload.version = version;
-  if (typeof width !== 'undefined') payload.width = width;
-  if (typeof height !== 'undefined') payload.height = height;
-  if (typeof backgroundColor !== 'undefined') payload.backgroundColor = backgroundColor;
-  if (typeof devicePixelRatio !== 'undefined') payload.devicePixelRatio = devicePixelRatio;
-  if (typeof format !== 'undefined') payload.format = format;
-
-  return payload;
-}
-
 export async function generateCharts(prompt, userId = 'default', options = {}) {
   const start = Date.now();
   const uploads = Array.isArray(options.uploads) ? options.uploads : [];
   const includeSearch = typeof options.includeSearch === 'boolean' ? options.includeSearch : (uploads.length === 0);
   const history = Array.isArray(options.history) ? options.history : [];
 
-  // Compose user message with uploads (same behavior as chat helper)
   let composedText = String(prompt || '');
   const uploadedText = await extractTextFromUploads(uploads);
   const uploadedImages = await extractImagesFromUploads(uploads);
@@ -200,88 +118,83 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
     .filter((message) => message && typeof message === 'object' && Array.isArray(message.parts))
     .slice(-MAX_HISTORY_MESSAGES);
 
-  const messages = [...trimmedHistory, { role: 'user', parts }];
-  const body = buildRequestBody(messages, CHARTS_PROMPT, includeSearch);
+  const contents = [...trimmedHistory, { role: 'user', parts }];
 
-  const url = `${BASE_URL}/${MODEL_ID}:${GENERATE_CONTENT_API}?key=${env.GEMINI_API_KEY}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+  const config = {
+    systemInstruction: CHARTS_PROMPT,
+    responseMimeType: 'application/json',
+  };
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const message = data?.error?.message || `${res.status} ${res.statusText}`;
+  let response;
+  try {
+    response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents,
+      config,
+    });
+  } catch (error) {
+    console.error('Gemini generateContent failed for charts:', error);
+    if (error && typeof error.message === 'string') {
+      console.error('Gemini error message (charts):', error.message);
+      try {
+        const parsed = JSON.parse(error.message);
+        console.error('Gemini error message parsed JSON (charts):', parsed);
+      } catch (_) {
+        // message was not JSON, ignore
+      }
+    }
     return {
       ok: false,
-      error: message,
-      status: res.status,
-      processingTime: Date.now() - start
+      error: error?.message || 'Failed to generate chart configuration',
+      status: null,
+      processingTime: Date.now() - start,
     };
   }
 
-  // Collect all text parts from the first candidate
-  const cand = data?.candidates?.[0];
-  const text = Array.isArray(cand?.content?.parts)
-    ? cand.content.parts.map(p => (typeof p?.text === 'string' ? p.text : '')).join('')
-    : '';
+  const text = typeof response.text === 'string' ? response.text : String(response.text || '');
 
-  // Log the raw response from Gemini for debugging
   console.log('=== Gemini Raw Response ===');
   console.log(text);
   console.log('==========================');
 
-  const parsed = tryParseJson(text.trim());
-
-  if (parsed.ok) {
-    const quickChartPayload = normalizeChartPayload(parsed.value);
-
-    if (!quickChartPayload) {
-      return {
-        ok: false,
-        chartConfig: null,
-        chartUrl: null,
-        quickChartSuccess: false,
-        raw: text,
-        error: 'Model returned an invalid chart configuration',
-        processingTime: Date.now() - start
-      };
-    }
-
-    // Call QuickChart API with the generated JSON
-    const quickChartResult = await callQuickChartAPI(quickChartPayload);
-    
-    if (!quickChartResult.success || !quickChartResult.url) {
-      return {
-        ok: false,
-        chartConfig: quickChartPayload.chart,
-        chartUrl: null,
-        quickChartSuccess: false,
-        raw: text,
-        error: quickChartResult.error || 'Failed to generate chart image',
-        processingTime: Date.now() - start
-      };
-    }
-
+  let chartPayload;
+  try {
+    const parsed = JSON.parse(text);
+    chartPayload = chartPayloadSchema.parse(parsed);
+  } catch (error) {
+    console.error('Gemini chart payload validation failed:', error);
     return {
-      ok: true,
-      chartConfig: quickChartPayload.chart,
-      chartUrl: quickChartResult.url,
-      quickChartSuccess: true,
+      ok: false,
+      chartConfig: null,
+      chartUrl: null,
+      quickChartSuccess: false,
       raw: text,
-      error: null,
-      processingTime: Date.now() - start
+      error: 'Invalid chart configuration returned by the model',
+      processingTime: Date.now() - start,
+    };
+  }
+
+  const quickChartResult = await callQuickChartAPI(chartPayload);
+
+  if (!quickChartResult.success || !quickChartResult.url) {
+    return {
+      ok: false,
+      chartConfig: chartPayload.chart || null,
+      chartUrl: null,
+      quickChartSuccess: false,
+      raw: text,
+      error: quickChartResult.error || 'Failed to generate chart image',
+      processingTime: Date.now() - start,
     };
   }
 
   return {
-    ok: false,
-    chartConfig: null,
-    chartUrl: null,
-    quickChartSuccess: false,
+    ok: true,
+    chartConfig: chartPayload.chart,
+    chartUrl: quickChartResult.url,
+    quickChartSuccess: true,
     raw: text,
-    error: parsed.error || 'Invalid chart configuration returned by the model',
-    processingTime: Date.now() - start
+    error: null,
+    processingTime: Date.now() - start,
   };
 }

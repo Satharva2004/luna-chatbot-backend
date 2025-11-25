@@ -12,6 +12,7 @@
   "license": "ISC",
   "keywords": [],
   "dependencies": {
+    "@google/genai": "^1.30.0",
     "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.57.4",
     "bcryptjs": "^3.0.2",
@@ -29,7 +30,9 @@
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^5.4.149",
     "uuid": "^9.0.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.0"
   },
   "devDependencies": {
     "@types/multer": "^2.0.0",

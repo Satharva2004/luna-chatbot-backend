@@ -184,6 +184,11 @@ export async function handleChartsGenerate(req, res) {
     }
 
     if (!result.ok) {
+      console.error('Charts generation failed:', {
+        error: result.error,
+        raw: result.raw,
+        processingTime: result.processingTime,
+      });
       return res.status(500).json({
         ok: false,
         error: result.error || 'Failed to generate chart',

@@ -390,7 +390,7 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
   const body = {
     contents: messages,
     generationConfig: {
-      temperature: 0.1, 
+      temperature: 0, 
       topP: 0.95,
       topK: 40,
       maxOutputTokens: CONFIG.MAX_OUTPUT_TOKENS,
@@ -414,7 +414,11 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
         category: "HARM_CATEGORY_DANGEROUS_CONTENT",
         threshold: "BLOCK_ONLY_HIGH" 
       }
-    ]
+    ],
+    config: {
+    tools: [{ codeExecution: {} }],
+
+  },
   };
 
   // Add system instruction if provided
