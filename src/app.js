@@ -67,7 +67,6 @@ const allowedOrigins = [
   'http://localhost:8080', // Localhost
   'https://lunnaa.vercel.app' //Lunna
 ];
-
 // Enable CORS for all routes
 app.use((req, res, next) => {
   const origin = req.headers.origin;
