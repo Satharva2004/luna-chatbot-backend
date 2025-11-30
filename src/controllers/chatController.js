@@ -245,6 +245,8 @@ export async function handleChatGenerate(req, res) {
 
     const aiContent = response?.content || response?.text || '';
     const aiSources = Array.isArray(response?.sources) ? response.sources : [];
+    const aiCodeSnippets = Array.isArray(response?.codeSnippets) ? response.codeSnippets : [];
+    const aiExecutionOutputs = Array.isArray(response?.executionOutputs) ? response.executionOutputs : [];
 
     const { error: saveError } = await supabase
       .from('messages')
@@ -280,6 +282,8 @@ export async function handleChatGenerate(req, res) {
       content: aiContent,
       sources: aiSources,
       images: imageResults,
+      codeSnippets: aiCodeSnippets,
+      executionOutputs: aiExecutionOutputs,
       timestamp: new Date().toISOString(),
       processingTime,
       attempts: response?.attempts || 1,
@@ -464,13 +468,14 @@ export async function handleChatStreamGenerate(req, res) {
       return res.end();
     }
 
-    // Track content for database persistence and emit simplified SSE {text: "..."}
+    // Track content for database persistence and emit SSE events for text, code, and sources
     upstream.body.on("data", (chunk) => {
       const chunkStr = chunk.toString();
       console.log('Received chunk from Gemini:', chunkStr);
       const blocks = chunkStr.split('\n\n');
       for (const block of blocks) {
         const dataLine = block.split('\n').find(l => l.startsWith('data: '));
+
         if (!dataLine) continue;
         const payload = dataLine.slice(6);
         if (!payload || payload === '[DONE]') continue;
@@ -480,13 +485,35 @@ export async function handleChatStreamGenerate(req, res) {
           const parts = cand?.content?.parts;
           if (Array.isArray(parts)) {
             for (const p of parts) {
+              // Text chunks
               if (typeof p?.text === 'string' && p.text.length) {
                 streamedContent += p.text;
                 res.write(`event: message\n`);
                 res.write(`data: ${JSON.stringify({ text: p.text })}\n\n`);
               }
+
+              // Executable code
+              if (p?.executableCode && typeof p.executableCode.code === 'string') {
+                const codePayload = {
+                  language: p.executableCode.language || 'unknown',
+                  code: p.executableCode.code
+                };
+                res.write(`event: code\n`);
+                res.write(`data: ${JSON.stringify(codePayload)}\n\n`);
+              }
+
+              // Code execution result
+              if (p?.codeExecutionResult && typeof p.codeExecutionResult.output === 'string') {
+                const resultPayload = {
+                  outcome: p.codeExecutionResult.outcome || 'unknown',
+                  output: p.codeExecutionResult.output
+                };
+                res.write(`event: codeResult\n`);
+                res.write(`data: ${JSON.stringify(resultPayload)}\n\n`);
+              }
             }
           }
+
           // Collect sources from grounding metadata if present
           const groundingChunks = cand?.groundingMetadata?.groundingChunks;
           if (Array.isArray(groundingChunks)) {

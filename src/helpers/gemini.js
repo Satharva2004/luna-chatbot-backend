@@ -258,13 +258,11 @@ async function processSourcesWithTitles(sources) {
       });
     }
   }
-
   return processedSources;
 }
 
-// Enhanced response processor that handles both streaming and non-streaming responses
 async function processGeminiResponse(response) {
-  const result = { content: '', sources: new Set() };
+  const result = { content: '', sources: new Set(), codeSnippets: [], executionOutputs: [] };
 
   try {
     // Handle streaming response (array of chunks) vs single response
@@ -281,20 +279,20 @@ async function processGeminiResponse(response) {
       const candidates = chunk.candidates;
       if (!candidates?.length) {
         console.warn(`No candidates in chunk ${i + 1}`);
-        
+
         // Check for prompt feedback only in first chunk
         if (i === 0 && chunk.promptFeedback) {
           console.warn('Prompt feedback:', chunk.promptFeedback);
           if (chunk.promptFeedback.blockReason) {
             result.content = `Content blocked: ${chunk.promptFeedback.blockReason}`;
-            return { content: result.content, sources: [] };
+            return { content: result.content, sources: [], codeSnippets: [], executionOutputs: [] };
           }
         }
         continue;
       }
 
       const candidate = candidates[0];
-      
+
       // Track finish reason from last chunk
       if (candidate.finishReason) {
         lastFinishReason = candidate.finishReason;
@@ -305,15 +303,32 @@ async function processGeminiResponse(response) {
       const parts = candidate.content?.parts;
       if (parts && Array.isArray(parts)) {
         const textParts = parts.filter(part => part.text && typeof part.text === 'string');
-        
+
         if (textParts.length > 0) {
           const chunkContent = textParts.map(part => part.text).join('');
           result.content += chunkContent;
           hasValidContent = true;
           console.log(`Chunk ${i + 1} added ${chunkContent.length} characters`);
         }
+
+        // Capture executable code and code execution results when present
+        for (const part of parts) {
+          if (part.executableCode && typeof part.executableCode.code === 'string') {
+            result.codeSnippets.push({
+              language: part.executableCode.language || 'unknown',
+              code: part.executableCode.code
+            });
+          }
+
+          if (part.codeExecutionResult && typeof part.codeExecutionResult.output === 'string') {
+            result.executionOutputs.push({
+              outcome: part.codeExecutionResult.outcome || 'unknown',
+              output: part.codeExecutionResult.output
+            });
+          }
+        }
       }
-      
+
       // Extract sources from this chunk
       const groundingChunks = candidate.groundingMetadata?.groundingChunks;
       if (groundingChunks && Array.isArray(groundingChunks)) {
@@ -326,11 +341,11 @@ async function processGeminiResponse(response) {
     // Check final finish reason for blocking
     if (lastFinishReason === 'SAFETY') {
       result.content = 'Response blocked due to safety filters';
-      return { content: result.content, sources: [] };
+      return { content: result.content, sources: [], codeSnippets: [], executionOutputs: [] };
     }
     if (lastFinishReason === 'RECITATION') {
       result.content = 'Response blocked due to recitation concerns';
-      return { content: result.content, sources: [] };
+      return { content: result.content, sources: [], codeSnippets: [], executionOutputs: [] };
     }
 
     // If we have content, extract URLs (markdown links and plain URLs) into sources
@@ -374,14 +389,18 @@ async function processGeminiResponse(response) {
 
     return {
       content: result.content,
-      sources: processedSources
+      sources: processedSources,
+      codeSnippets: result.codeSnippets,
+      executionOutputs: result.executionOutputs
     };
 
   } catch (error) {
     console.error('Error processing Gemini response:', error);
     return {
       content: `Error processing response: ${error.message}`,
-      sources: []
+      sources: [],
+      codeSnippets: [],
+      executionOutputs: []
     };
   }
 }
@@ -389,6 +408,7 @@ async function processGeminiResponse(response) {
 export function buildRequestBody(messages, systemPrompt = null, includeSearch = true) {
   const body = {
     contents: messages,
+
     generationConfig: {
       temperature: 0, 
       topP: 0.95,
@@ -415,10 +435,8 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
         threshold: "BLOCK_ONLY_HIGH" 
       }
     ],
-    config: {
-    tools: [{ codeExecution: {} }],
-
-  },
+    // Enable Gemini code execution tool by default
+    tools: [{ codeExecution: {} }]
   };
 
   // Add system instruction if provided
@@ -444,13 +462,13 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
   }
 
   if (includeSearch) {
-    body.tools = [{ googleSearch: {} }];
+    body.tools = body.tools || [];
+    body.tools.push({ googleSearch: {} });
   }
 
   console.log('Built request body:', JSON.stringify(body, null, 2));
   return body;
 }
-
 async function fetchWithTimeout(url, options, timeout = CONFIG.REQUEST_TIMEOUT) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
