@@ -189,9 +189,12 @@ export async function handleChartsGenerate(req, res) {
         raw: result.raw,
         processingTime: result.processingTime,
       });
-      return res.status(500).json({
+      const status = result.errorCode === 'NO_CHART_FOUND' ? 422 : 500;
+      return res.status(status).json({
         ok: false,
         error: result.error || 'Failed to generate chart',
+        userMessage: result.userMessage || null,
+        errorCode: result.errorCode || null,
         processingTime: result.processingTime || null,
       });
     }
@@ -294,7 +297,9 @@ export async function handleChatWithChartsParallel(req, res) {
         chartUrl: charts?.chartUrl || null,
         chartConfig: charts?.chartConfig || null,
         quickChartSuccess: charts?.quickChartSuccess === true,
-        error: charts?.ok === true ? null : (charts?.error || 'Failed to generate charts')
+        error: charts?.ok === true ? null : (charts?.error || 'Failed to generate charts'),
+        userMessage: charts?.ok === true ? null : (charts?.userMessage || null),
+        errorCode: charts?.ok === true ? null : (charts?.errorCode || null),
       }
     });
   } catch (error) {

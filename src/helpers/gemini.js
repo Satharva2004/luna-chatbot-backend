@@ -33,13 +33,25 @@ export const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models
 // Configuration constants
 const CONFIG = {
   MAX_HISTORY_LENGTH: 10,
-  MAX_OUTPUT_TOKENS: 8192, 
+  MAX_OUTPUT_TOKENS: 65536, 
   MAX_USERS: 100,
   RETRY_DELAY: 1000, //1ms
   REQUEST_TIMEOUT: 60000,
   TITLE_FETCH_TIMEOUT: 5000, // 5 seconds for title fetching
   MAX_TITLE_LENGTH: 100, // Maximum title length
 };
+
+const MERMAID_SYSTEM_RULES = [
+  'When you include Mermaid diagrams, you must follow these rules:',
+  '- Keep all normal explanation text outside of code fences.',
+  '- If you use Mermaid, wrap the diagram in exactly one fenced block using ```mermaid on its own line, and ``` on its own closing line.',
+  '- Do not include any comments, markdown, or explanations inside the mermaid block – only valid Mermaid syntax.',
+  '- Avoid unsupported Mermaid features: no click events, no linkStyle, no style sections, no classDef or class assignments, no markdown or HTML inside nodes.',
+  '- Keep diagrams lightweight: short node labels, simple shapes, mostly linear layout, and generally no more than about 10 nodes unless the user explicitly asks for more.',
+  '- Allowed diagram types: flowcharts with graph TD or graph LR, sequence diagrams, state diagrams, pie charts, and simple ER diagrams.',
+  '- Do not emit more than one mermaid fenced block in a single answer unless the user explicitly asks for multiple diagrams.',
+  '- Make sure the Mermaid code is syntactically valid and could render in standard Mermaid tools.',
+].join('\n');
 
 // Retryable HTTP status codes
 const RETRYABLE_STATUS_CODES = new Set([429, 502, 503, 504]);
@@ -434,9 +446,7 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
         category: "HARM_CATEGORY_DANGEROUS_CONTENT",
         threshold: "BLOCK_ONLY_HIGH" 
       }
-    ],
-    // Enable Gemini code execution tool by default
-    tools: [{ codeExecution: {} }]
+    ]
   };
 
   // Add system instruction if provided
@@ -655,6 +665,7 @@ export async function generateContent(
     const expertType = (options.expert || 'research').toLowerCase();
     const customSystemPrompt = options.systemPrompt;
     let selectedSystemPrompt = customSystemPrompt;
+
     if (!selectedSystemPrompt) {
       const promptEntry = EXPERT_PROMPTS[expertType] || EXPERT_PROMPTS.default;
       if (typeof promptEntry === 'function') {
@@ -666,6 +677,10 @@ export async function generateContent(
       } else {
         selectedSystemPrompt = promptEntry;
       }
+    }
+
+    if (selectedSystemPrompt && typeof selectedSystemPrompt === 'string') {
+      selectedSystemPrompt = `${selectedSystemPrompt}\n\n${MERMAID_SYSTEM_RULES}`;
     }
 
     // Get user history and prepare messages

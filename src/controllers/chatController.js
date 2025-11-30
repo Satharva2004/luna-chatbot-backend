@@ -6,6 +6,7 @@ import { searchImages } from '../helpers/imageSearch.js';
 import { RESEARCH_ASSISTANT_PROMPT } from '../prompts/researchAssistantPrompt.js';
 import YouTubeMCP from '../helpers/youtubeSearch.js';
 import env from '../config/env.js';
+import { processMermaidBlocks } from '../helpers/mermaid.js';
 
 const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY);
 
@@ -540,6 +541,22 @@ export async function handleChatStreamGenerate(req, res) {
     upstream.body.on("end", async () => {
       console.log('Gemini stream ended');
       try {
+        let mermaidProcessingResult = { content: streamedContent, blocks: [] };
+        try {
+          mermaidProcessingResult = await processMermaidBlocks({
+            content: streamedContent,
+            prompt,
+            userId,
+          });
+          streamedContent = mermaidProcessingResult.content;
+          if (mermaidProcessingResult.blocks.length > 0 && !res.writableEnded) {
+            res.write(`event: mermaid\n`);
+            res.write(`data: ${JSON.stringify({ blocks: mermaidProcessingResult.blocks })}\n\n`);
+          }
+        } catch (mermaidError) {
+          console.warn('Mermaid processing failed:', mermaidError?.message || mermaidError);
+        }
+
         if (streamedSources.size > 0) {
           console.log(`[chatStream] emitting sources from streamed grounding: count=${streamedSources.size}`);
           // Resolve titles for sources concurrently (limit simple)

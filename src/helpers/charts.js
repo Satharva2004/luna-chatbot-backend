@@ -12,6 +12,20 @@ const MAX_HISTORY_MESSAGES = 10;
 const ai = new GoogleGenAI({
   apiKey: env.GEMINI_API_KEY,
 });
+const SUPPORTED_CHART_TYPES = new Set([
+  "bar",
+  "line",
+  "pie",
+  "doughnut",
+  "polararea",
+  "radar",
+  "scatter",
+  "bubble",
+  "horizontalbar",
+]);
+const HUMANIZED_NO_CHART_MESSAGE =
+  "I couldn’t find a chart that fits that request. Try rephrasing it with more specific data or a chart type.";
+const NO_CHART_FOUND_CODE = "NO_CHART_FOUND";
 
 const datasetSchema = z.object({
   label: z.string().optional(),
@@ -104,6 +118,22 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
   const includeSearch = typeof options.includeSearch === 'boolean' ? options.includeSearch : (uploads.length === 0);
   const history = Array.isArray(options.history) ? options.history : [];
 
+  const buildNoChartFoundResult = ({
+    chartConfig = null,
+    rawText = null,
+    developerMessage = 'Failed to generate chart configuration',
+  } = {}) => ({
+    ok: false,
+    chartConfig,
+    chartUrl: null,
+    quickChartSuccess: false,
+    raw: rawText,
+    error: developerMessage,
+    userMessage: HUMANIZED_NO_CHART_MESSAGE,
+    errorCode: NO_CHART_FOUND_CODE,
+    processingTime: Date.now() - start,
+  });
+
   let composedText = String(prompt || '');
   const uploadedText = await extractTextFromUploads(uploads);
   const uploadedImages = await extractImagesFromUploads(uploads);
@@ -163,29 +193,34 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
     chartPayload = chartPayloadSchema.parse(parsed);
   } catch (error) {
     console.error('Gemini chart payload validation failed:', error);
-    return {
-      ok: false,
-      chartConfig: null,
-      chartUrl: null,
-      quickChartSuccess: false,
-      raw: text,
-      error: 'Invalid chart configuration returned by the model',
-      processingTime: Date.now() - start,
-    };
+    return buildNoChartFoundResult({
+      rawText: text,
+      developerMessage: 'Invalid chart configuration returned by the model',
+    });
+  }
+
+  const chartType = typeof chartPayload?.chart?.type === 'string'
+    ? chartPayload.chart.type.trim().toLowerCase()
+    : '';
+  if (!SUPPORTED_CHART_TYPES.has(chartType)) {
+    console.warn('Unsupported or missing chart type for payload:', chartPayload?.chart?.type);
+    return buildNoChartFoundResult({
+      chartConfig: chartPayload.chart || null,
+      rawText: text,
+      developerMessage: chartType
+        ? `Unsupported chart type "${chartPayload.chart.type}"`
+        : 'Missing chart type in payload',
+    });
   }
 
   const quickChartResult = await callQuickChartAPI(chartPayload);
 
   if (!quickChartResult.success || !quickChartResult.url) {
-    return {
-      ok: false,
+    return buildNoChartFoundResult({
       chartConfig: chartPayload.chart || null,
-      chartUrl: null,
-      quickChartSuccess: false,
-      raw: text,
-      error: quickChartResult.error || 'Failed to generate chart image',
-      processingTime: Date.now() - start,
-    };
+      rawText: text,
+      developerMessage: quickChartResult.error || 'Failed to generate chart image',
+    });
   }
 
   return {
@@ -195,6 +230,8 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
     quickChartSuccess: true,
     raw: text,
     error: null,
+    userMessage: null,
+    errorCode: null,
     processingTime: Date.now() - start,
   };
 }
