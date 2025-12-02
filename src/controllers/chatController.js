@@ -470,76 +470,91 @@ export async function handleChatStreamGenerate(req, res) {
     }
 
     // Track content for database persistence and emit SSE events for text, code, and sources
+    let sseBuffer = '';
+
+    const processSseBlock = (block) => {
+      const dataLine = block.split('\n').find(l => l.startsWith('data: '));
+
+      if (!dataLine) return;
+      const payload = dataLine.slice(6);
+      if (!payload || payload === '[DONE]') return;
+      try {
+        const obj = JSON.parse(payload);
+        const cand = obj?.candidates?.[0];
+        const parts = cand?.content?.parts;
+        if (Array.isArray(parts)) {
+          for (const p of parts) {
+            // Text chunks
+            if (typeof p?.text === 'string' && p.text.length) {
+              streamedContent += p.text;
+              res.write(`event: message\n`);
+              res.write(`data: ${JSON.stringify({ text: p.text })}\n\n`);
+            }
+
+            // Executable code
+            if (p?.executableCode && typeof p.executableCode.code === 'string') {
+              const codePayload = {
+                language: p.executableCode.language || 'unknown',
+                code: p.executableCode.code
+              };
+              res.write(`event: code\n`);
+              res.write(`data: ${JSON.stringify(codePayload)}\n\n`);
+            }
+
+            // Code execution result
+            if (p?.codeExecutionResult && typeof p.codeExecutionResult.output === 'string') {
+              const resultPayload = {
+                outcome: p.codeExecutionResult.outcome || 'unknown',
+                output: p.codeExecutionResult.output
+              };
+              res.write(`event: codeResult\n`);
+              res.write(`data: ${JSON.stringify(resultPayload)}\n\n`);
+            }
+          }
+        }
+
+        // Collect sources from grounding metadata if present
+        const groundingChunks = cand?.groundingMetadata?.groundingChunks;
+        if (Array.isArray(groundingChunks)) {
+          for (const gc of groundingChunks) {
+            const uri = gc?.web?.uri;
+            if (typeof uri === 'string' && uri.startsWith('http')) {
+              streamedSources.add(uri);
+            }
+          }
+          if (groundingChunks.length) {
+            console.log('[chatStream] collected grounding URLs from chunk:', groundingChunks.map(g => g?.web?.uri).filter(Boolean));
+          }
+        }
+        if (cand?.finishReason) {
+          res.write(`event: finish\n`);
+          res.write(`data: ${JSON.stringify({ finishReason: cand.finishReason })}\n\n`);
+        }
+      } catch (_) {
+        // ignore non-JSON frames
+      }
+    };
+
     upstream.body.on("data", (chunk) => {
       const chunkStr = chunk.toString();
       console.log('Received chunk from Gemini:', chunkStr);
-      const blocks = chunkStr.split('\n\n');
+      sseBuffer += chunkStr;
+      const blocks = sseBuffer.split('\n\n');
+      sseBuffer = blocks.pop() || '';
       for (const block of blocks) {
-        const dataLine = block.split('\n').find(l => l.startsWith('data: '));
-
-        if (!dataLine) continue;
-        const payload = dataLine.slice(6);
-        if (!payload || payload === '[DONE]') continue;
-        try {
-          const obj = JSON.parse(payload);
-          const cand = obj?.candidates?.[0];
-          const parts = cand?.content?.parts;
-          if (Array.isArray(parts)) {
-            for (const p of parts) {
-              // Text chunks
-              if (typeof p?.text === 'string' && p.text.length) {
-                streamedContent += p.text;
-                res.write(`event: message\n`);
-                res.write(`data: ${JSON.stringify({ text: p.text })}\n\n`);
-              }
-
-              // Executable code
-              if (p?.executableCode && typeof p.executableCode.code === 'string') {
-                const codePayload = {
-                  language: p.executableCode.language || 'unknown',
-                  code: p.executableCode.code
-                };
-                res.write(`event: code\n`);
-                res.write(`data: ${JSON.stringify(codePayload)}\n\n`);
-              }
-
-              // Code execution result
-              if (p?.codeExecutionResult && typeof p.codeExecutionResult.output === 'string') {
-                const resultPayload = {
-                  outcome: p.codeExecutionResult.outcome || 'unknown',
-                  output: p.codeExecutionResult.output
-                };
-                res.write(`event: codeResult\n`);
-                res.write(`data: ${JSON.stringify(resultPayload)}\n\n`);
-              }
-            }
-          }
-
-          // Collect sources from grounding metadata if present
-          const groundingChunks = cand?.groundingMetadata?.groundingChunks;
-          if (Array.isArray(groundingChunks)) {
-            for (const gc of groundingChunks) {
-              const uri = gc?.web?.uri;
-              if (typeof uri === 'string' && uri.startsWith('http')) {
-                streamedSources.add(uri);
-              }
-            }
-            if (groundingChunks.length) {
-              console.log('[chatStream] collected grounding URLs from chunk:', groundingChunks.map(g => g?.web?.uri).filter(Boolean));
-            }
-          }
-          if (cand?.finishReason) {
-            res.write(`event: finish\n`);
-            res.write(`data: ${JSON.stringify({ finishReason: cand.finishReason })}\n\n`);
-          }
-        } catch (_) {
-          // ignore non-JSON frames
-        }
+        if (block.trim().length === 0) continue;
+        processSseBlock(block);
       }
     });
 
     upstream.body.on("end", async () => {
       console.log('Gemini stream ended');
+      // Process any remaining partial SSE block so we don't drop the tail of the response
+      if (sseBuffer.trim().length > 0) {
+        processSseBlock(sseBuffer);
+        sseBuffer = '';
+      }
+
       try {
         let mermaidProcessingResult = { content: streamedContent, blocks: [] };
         try {
