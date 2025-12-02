@@ -7,7 +7,6 @@ import { PORTFOLIO_EXPERT_PROMPT as INVESTMENT_EXPERT_PROMPT } from "../prompts/
 import { STOCK_EXPERT_PROMPT } from "../prompts/stockexpert.js";
 import { RETIREMENT_TAX_EXPERT_PROMPT } from "../prompts/retierment_tax_expert.js";
 
-
 import env from "../config/env.js";
 
 // Map of expert types to their corresponding prompts
@@ -473,12 +472,14 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
 
   if (includeSearch) {
     body.tools = body.tools || [];
+    body.tools.push({ urlContext: {} });
     body.tools.push({ googleSearch: {} });
   }
 
   console.log('Built request body:', JSON.stringify(body, null, 2));
   return body;
 }
+
 async function fetchWithTimeout(url, options, timeout = CONFIG.REQUEST_TIMEOUT) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
