@@ -323,6 +323,8 @@ export async function handleChatStreamGenerate(req, res) {
     let streamedContent = '';
     const streamedSources = new Set();
     let finalSourcesWithTitles = []; // Store final sources to save to DB
+    let streamComplete = false; // Track if we received finishReason: "STOP"
+    let lastFinishReason = null; // Store the finish reason for validation
     // After getting the userId from req.userId
     const { data: userData, error: userError } = await supabase
     .from('users')
@@ -472,12 +474,15 @@ export async function handleChatStreamGenerate(req, res) {
     // Track content for database persistence and emit SSE events for text, code, and sources
     let sseBuffer = '';
 
-    const processSseBlock = (block) => {
-      const dataLine = block.split('\n').find(l => l.startsWith('data: '));
+    const processSSEBlock = (block) => {
+      const dataLine = block
+        .split(/\r?\n/)
+        .find(l => l.startsWith('data: '));
 
       if (!dataLine) return;
-      const payload = dataLine.slice(6);
+      const payload = dataLine.slice(6).trim();
       if (!payload || payload === '[DONE]') return;
+
       try {
         const obj = JSON.parse(payload);
         const cand = obj?.candidates?.[0];
@@ -523,15 +528,26 @@ export async function handleChatStreamGenerate(req, res) {
             }
           }
           if (groundingChunks.length) {
-            console.log('[chatStream] collected grounding URLs from chunk:', groundingChunks.map(g => g?.web?.uri).filter(Boolean));
+            console.log(
+              '[chatStream] collected grounding URLs from chunk:',
+              groundingChunks.map(g => g?.web?.uri).filter(Boolean)
+            );
           }
         }
+        
+        // Track finish reason to ensure stream completion
         if (cand?.finishReason) {
+          lastFinishReason = cand.finishReason;
+          if (cand.finishReason === 'STOP') {
+            streamComplete = true;
+            console.log('[chatStream] Received finishReason: STOP - stream is complete');
+          }
           res.write(`event: finish\n`);
           res.write(`data: ${JSON.stringify({ finishReason: cand.finishReason })}\n\n`);
         }
-      } catch (_) {
-        // ignore non-JSON frames
+      } catch (e) {
+        // Most parse errors will be due to partial JSON; the remainder stays in sseBuffer
+        console.warn('Failed to parse SSE JSON block:', e.message);
       }
     };
 
@@ -539,22 +555,27 @@ export async function handleChatStreamGenerate(req, res) {
       const chunkStr = chunk.toString();
       console.log('Received chunk from Gemini:', chunkStr);
       sseBuffer += chunkStr;
-      const blocks = sseBuffer.split('\n\n');
+
+      // Split into SSE blocks; last block may be incomplete and stays in buffer
+      const blocks = sseBuffer.split(/\r?\n\r?\n/);
       sseBuffer = blocks.pop() || '';
+
       for (const block of blocks) {
-        if (block.trim().length === 0) continue;
-        processSseBlock(block);
+        processSSEBlock(block);
       }
     });
 
     upstream.body.on("end", async () => {
       console.log('Gemini stream ended');
-      // Process any remaining partial SSE block so we don't drop the tail of the response
+      console.log(`[chatStream] Stream completion status: streamComplete=${streamComplete}, lastFinishReason=${lastFinishReason}, contentLength=${streamedContent.length}`);
+
+      // Process any trailing buffer that lacked the final delimiter
       if (sseBuffer.trim().length > 0) {
-        processSseBlock(sseBuffer);
+        console.log('[chatStream] Flushing trailing SSE buffer block');
+        processSSEBlock(sseBuffer);
         sseBuffer = '';
       }
-
+      
       try {
         let mermaidProcessingResult = { content: streamedContent, blocks: [] };
         try {
@@ -625,8 +646,14 @@ export async function handleChatStreamGenerate(req, res) {
         console.warn('Failed to emit sources/title message:', e?.message || e);
       }
       
-      // Save messages to database after streaming completes WITH SOURCES
+      // Save messages to database ONLY after streaming completes with finishReason: STOP
       try {
+        if (!streamComplete) {
+          console.warn('[chatStream] WARNING: Stream ended without finishReason: STOP. Content may be incomplete. streamComplete=', streamComplete, 'lastFinishReason=', lastFinishReason);
+        }
+        
+        console.log(`[chatStream] Saving to database: contentLength=${streamedContent.length}, sourcesCount=${finalSourcesWithTitles.length}, streamComplete=${streamComplete}`);
+        
         const { data: insertedStreamMessages, error: saveError } = await supabase
           .from('messages')
           .insert([
@@ -640,7 +667,7 @@ export async function handleChatStreamGenerate(req, res) {
               conversation_id: currentConversationId,
               role: 'model',
               content: streamedContent,
-              sources: finalSourcesWithTitles, // NOW SAVING SOURCES!
+              sources: finalSourcesWithTitles,
               images: imageResults,
               videos: youtubeVideos.length > 0 ? youtubeVideos : null
             }
@@ -649,7 +676,7 @@ export async function handleChatStreamGenerate(req, res) {
         if (saveError) {
           console.error('Error saving streamed messages:', saveError);
         } else {
-          console.log(`[chatStream] Successfully saved messages with ${finalSourcesWithTitles.length} sources`);
+          console.log(`[chatStream] Successfully saved messages with ${finalSourcesWithTitles.length} sources and ${streamedContent.length} characters`);
         }
 
         // Update conversation timestamp

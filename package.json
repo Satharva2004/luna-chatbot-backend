@@ -38,6 +38,7 @@
     "@mermaid-js/mermaid-cli": "^11.12.0",
     "@types/multer": "^2.0.0",
     "@types/xlsx": "^0.0.35",
+    "eslint": "^9.39.1",
     "nodemon": "^2.0.22"
   },
   "repository": {
