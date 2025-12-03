@@ -16,6 +16,10 @@ if (!youtubeMCP) {
   console.warn('⚠️  YouTube API key not configured - YouTube search will be disabled');
 }
 
+const STREAM_FINISH_DEBOUNCE_MS = 80;
+const STREAM_CLOSE_DELAY_MS = 60;
+const sleep = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * Fetch page title from URL
  * @param {string} url - The URL to fetch title from
@@ -542,8 +546,17 @@ export async function handleChatStreamGenerate(req, res) {
             streamComplete = true;
             console.log('[chatStream] Received finishReason: STOP - stream is complete');
           }
-          res.write(`event: finish\n`);
-          res.write(`data: ${JSON.stringify({ finishReason: cand.finishReason })}\n\n`);
+          const emitFinish = () => {
+            if (res.writableEnded) return;
+            res.write(`event: finish\n`);
+            res.write(`data: ${JSON.stringify({ finishReason: cand.finishReason })}\n\n`);
+          };
+
+          if (cand.finishReason === 'STOP') {
+            setTimeout(emitFinish, STREAM_FINISH_DEBOUNCE_MS);
+          } else {
+            emitFinish();
+          }
         }
       } catch (e) {
         // Most parse errors will be due to partial JSON; the remainder stays in sseBuffer
@@ -689,6 +702,7 @@ export async function handleChatStreamGenerate(req, res) {
         console.error('Database error after streaming:', dbError);
       }
       
+      await sleep(STREAM_CLOSE_DELAY_MS);
       res.end();
     });
 
