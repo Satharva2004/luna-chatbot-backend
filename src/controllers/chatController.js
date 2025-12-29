@@ -123,7 +123,7 @@ async function searchYouTubeVideos(query, userId) {
     console.log('[YouTube MCP] YouTube search disabled - no API key configured');
     return [];
   }
-  
+
   try {
     console.log('[YouTube MCP] Searching for:', query);
     const result = await youtubeMCP.search({
@@ -157,7 +157,7 @@ export async function handleChatGenerate(req, res) {
       try { options = JSON.parse(options); } catch { options = {}; }
     }
     options = options || {};
-    
+
     if (!prompt) {
       return res.status(400).json({ error: "Prompt is required" });
     }
@@ -165,17 +165,17 @@ export async function handleChatGenerate(req, res) {
     // userId is set by optionalAuth middleware
     const userId = req.userId;
     let currentConversationId = conversationId;
-    
+
     // After getting the userId from req.userId
     const { data: userData, error: userError } = await supabase
-    .from('users')
-    .select('username, email') // Select the fields you need
-    .eq('id', userId)
-    .single();
+      .from('users')
+      .select('username, email') // Select the fields you need
+      .eq('id', userId)
+      .single();
 
     if (userError) {
-    console.error('Error fetching user data:', userError);
-    // Handle error or continue without username
+      console.error('Error fetching user data:', userError);
+      // Handle error or continue without username
     }
 
     const username = userData?.username || '';
@@ -191,12 +191,12 @@ export async function handleChatGenerate(req, res) {
         })
         .select()
         .single();
-        
+
       if (convError) {
         console.error('Error creating conversation:', convError);
         return res.status(500).json({ error: 'Failed to create conversation' });
       }
-      
+
       currentConversationId = conversation.id;
     }
 
@@ -212,19 +212,19 @@ export async function handleChatGenerate(req, res) {
       console.error('Error fetching history:', historyError);
       return res.status(500).json({ error: 'Failed to fetch conversation history' });
     }
-    
+
     // Reverse to get chronological order
     const chatHistory = messages ? [...messages].reverse().map(m => ({
       role: m.role,
       parts: [{ text: m.content }]
     })) : [];
-    
+
     // Add current user message to history
     chatHistory.push({
       role: 'user',
       parts: [{ text: prompt }]
     });
-    
+
     // Determine includeSearch similar to geminiController: default false if files provided
     const uploads = Array.isArray(req.files) ? req.files : [];
     const effectiveIncludeSearch = typeof options.includeSearch === 'boolean'
@@ -252,6 +252,13 @@ export async function handleChatGenerate(req, res) {
     const aiSources = Array.isArray(response?.sources) ? response.sources : [];
     const aiCodeSnippets = Array.isArray(response?.codeSnippets) ? response.codeSnippets : [];
     const aiExecutionOutputs = Array.isArray(response?.executionOutputs) ? response.executionOutputs : [];
+    const aiExcalidrawData = Array.isArray(response?.excalidrawData) ? response.excalidrawData : null;
+
+    // If content is empty but we have excalidrawData, add a default message
+    let finalContent = aiContent;
+    if (!finalContent && aiExcalidrawData && aiExcalidrawData.length > 0) {
+      finalContent = "I've created a flowchart for you. You can view, download, or expand it below.";
+    }
 
     const { error: saveError } = await supabase
       .from('messages')
@@ -266,9 +273,10 @@ export async function handleChatGenerate(req, res) {
         {
           conversation_id: currentConversationId,
           role: 'model',
-          content: aiContent,
+          content: finalContent,
           sources: aiSources,
-          images: imageResults.length > 0 ? imageResults : null
+          images: imageResults.length > 0 ? imageResults : null,
+          excalidraw_data: aiExcalidrawData // Store in database
         }
       ]);
 
@@ -284,11 +292,12 @@ export async function handleChatGenerate(req, res) {
       .eq('id', currentConversationId);
 
     const apiResponse = {
-      content: aiContent,
+      content: finalContent,
       sources: aiSources,
       images: imageResults,
       codeSnippets: aiCodeSnippets,
       executionOutputs: aiExecutionOutputs,
+      excalidrawData: aiExcalidrawData, // Include in API response
       timestamp: new Date().toISOString(),
       processingTime,
       attempts: response?.attempts || 1,
@@ -299,7 +308,7 @@ export async function handleChatGenerate(req, res) {
 
   } catch (error) {
     console.error('Error in handleChatGenerate:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
@@ -317,7 +326,7 @@ export async function handleChatStreamGenerate(req, res) {
     }
     const options = typeof rawOptions === 'object' && rawOptions !== null ? rawOptions : {};
     const prompt = String(rawPrompt || '').trim();
-    
+
     if (!prompt) {
       return res.status(400).json({ error: "Prompt is required" });
     }
@@ -331,14 +340,14 @@ export async function handleChatStreamGenerate(req, res) {
     let lastFinishReason = null; // Store the finish reason for validation
     // After getting the userId from req.userId
     const { data: userData, error: userError } = await supabase
-    .from('users')
-    .select('username, email') // Select the fields you need
-    .eq('id', userId)
-    .single();
+      .from('users')
+      .select('username, email') // Select the fields you need
+      .eq('id', userId)
+      .single();
 
     if (userError) {
-    console.error('Error fetching user data:', userError);
-    // Handle error or continue without username
+      console.error('Error fetching user data:', userError);
+      // Handle error or continue without username
     }
 
     const username = userData?.username || 'Anonymous';
@@ -353,12 +362,12 @@ export async function handleChatStreamGenerate(req, res) {
         })
         .select()
         .single();
-        
+
       if (convError) {
         console.error('Error creating conversation:', convError);
         return res.status(500).json({ error: 'Failed to create conversation' });
       }
-      
+
       currentConversationId = conversation.id;
     }
 
@@ -429,7 +438,7 @@ export async function handleChatStreamGenerate(req, res) {
     const youtubeResultsPromise = includeYouTube && contextualSearchQuery
       ? searchYouTubeVideos(contextualSearchQuery, userId)
       : Promise.resolve(null);
-    
+
     const [imageResults, youtubeResultsPayload] = await Promise.all([imageResultsPromise, youtubeResultsPromise]);
     console.log('[chatStream] youtubeResultsPayload:', youtubeResultsPayload);
     const youtubeVideos = Array.isArray(youtubeResultsPayload)
@@ -478,7 +487,7 @@ export async function handleChatStreamGenerate(req, res) {
     // Track content for database persistence and emit SSE events for text, code, and sources
     let sseBuffer = '';
 
-    const processSSEBlock = (block) => {
+    const processSSEBlock = async (block) => {
       const dataLine = block
         .split(/\r?\n/)
         .find(l => l.startsWith('data: '));
@@ -519,6 +528,44 @@ export async function handleChatStreamGenerate(req, res) {
               res.write(`event: codeResult\n`);
               res.write(`data: ${JSON.stringify(resultPayload)}\n\n`);
             }
+
+            // Function calls (e.g., Excalidraw generation)
+            if (p?.functionCall) {
+              console.log('[chatStream] Function call detected:', p.functionCall);
+
+              // Handle Excalidraw flowchart generation
+              if (p.functionCall.name === 'generate_excalidraw_flowchart') {
+                try {
+                  console.log('[chatStream] Executing Excalidraw generation');
+                  const { generateExcalidrawFlowchart } = await import('../helpers/groq.js');
+                  const flowchartData = await generateExcalidrawFlowchart(
+                    p.functionCall.args.prompt,
+                    {
+                      style: p.functionCall.args.style || 'modern',
+                      complexity: p.functionCall.args.complexity || 'detailed'
+                    }
+                  );
+
+                  // Emit excalidraw event
+                  res.write(`event: excalidraw\n`);
+                  res.write(`data: ${JSON.stringify({ excalidrawData: [flowchartData] })}\n\n`);
+
+                  // Also emit a text message about the flowchart
+                  const message = "I've created a flowchart for you. You can view, download, or expand it below.";
+                  streamedContent += message;
+                  res.write(`event: message\n`);
+                  res.write(`data: ${JSON.stringify({ text: message })}\n\n`);
+
+                  console.log('[chatStream] Excalidraw flowchart generated and emitted');
+                } catch (error) {
+                  console.error('[chatStream] Error generating Excalidraw:', error);
+                  const errorMsg = `\n\n[Note: Failed to generate flowchart: ${error.message}]`;
+                  streamedContent += errorMsg;
+                  res.write(`event: message\n`);
+                  res.write(`data: ${JSON.stringify({ text: errorMsg })}\n\n`);
+                }
+              }
+            }
           }
         }
 
@@ -538,7 +585,7 @@ export async function handleChatStreamGenerate(req, res) {
             );
           }
         }
-        
+
         // Track finish reason to ensure stream completion
         if (cand?.finishReason) {
           lastFinishReason = cand.finishReason;
@@ -564,7 +611,7 @@ export async function handleChatStreamGenerate(req, res) {
       }
     };
 
-    upstream.body.on("data", (chunk) => {
+    upstream.body.on("data", async (chunk) => {
       const chunkStr = chunk.toString();
       console.log('Received chunk from Gemini:', chunkStr);
       sseBuffer += chunkStr;
@@ -574,7 +621,7 @@ export async function handleChatStreamGenerate(req, res) {
       sseBuffer = blocks.pop() || '';
 
       for (const block of blocks) {
-        processSSEBlock(block);
+        await processSSEBlock(block);
       }
     });
 
@@ -585,10 +632,10 @@ export async function handleChatStreamGenerate(req, res) {
       // Process any trailing buffer that lacked the final delimiter
       if (sseBuffer.trim().length > 0) {
         console.log('[chatStream] Flushing trailing SSE buffer block');
-        processSSEBlock(sseBuffer);
+        await processSSEBlock(sseBuffer);
         sseBuffer = '';
       }
-      
+
       try {
         let mermaidProcessingResult = { content: streamedContent, blocks: [] };
         try {
@@ -658,15 +705,15 @@ export async function handleChatStreamGenerate(req, res) {
       } catch (e) {
         console.warn('Failed to emit sources/title message:', e?.message || e);
       }
-      
+
       // Save messages to database ONLY after streaming completes with finishReason: STOP
       try {
         if (!streamComplete) {
           console.warn('[chatStream] WARNING: Stream ended without finishReason: STOP. Content may be incomplete. streamComplete=', streamComplete, 'lastFinishReason=', lastFinishReason);
         }
-        
+
         console.log(`[chatStream] Saving to database: contentLength=${streamedContent.length}, sourcesCount=${finalSourcesWithTitles.length}, streamComplete=${streamComplete}`);
-        
+
         const { data: insertedStreamMessages, error: saveError } = await supabase
           .from('messages')
           .insert([
@@ -685,7 +732,7 @@ export async function handleChatStreamGenerate(req, res) {
               videos: youtubeVideos.length > 0 ? youtubeVideos : null
             }
           ]);
-          
+
         if (saveError) {
           console.error('Error saving streamed messages:', saveError);
         } else {
@@ -701,7 +748,7 @@ export async function handleChatStreamGenerate(req, res) {
       } catch (dbError) {
         console.error('Database error after streaming:', dbError);
       }
-      
+
       await sleep(STREAM_CLOSE_DELAY_MS);
       res.end();
     });
@@ -734,7 +781,7 @@ export async function handleChatStreamGenerate(req, res) {
       // swallow
     } finally {
       if (!res.writableEnded) {
-        try { res.end(); } catch {}
+        try { res.end(); } catch { }
       }
     }
   }
@@ -744,22 +791,22 @@ export async function handleChatStreamGenerate(req, res) {
 export async function getConversations(req, res) {
   try {
     const userId = req.userId;
-    
+
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    
+
     const { data: conversations, error } = await supabase
       .from('conversations')
       .select('id, title, created_at, updated_at')
       .eq('user_id', userId)
       .order('updated_at', { ascending: false });
-      
+
     if (error) {
       console.error('Error fetching conversations:', error);
       return res.status(500).json({ error: 'Failed to fetch conversations' });
     }
-    
+
     res.json(conversations);
   } catch (error) {
     console.error('Error in getConversations:', error);
@@ -812,7 +859,7 @@ export async function getConversationHistory(req, res) {
   } catch (error) {
     console.error('Error in getConversationHistory:', error);
     const isNetwork = (error?.message || '').toLowerCase().includes('fetch failed');
-    res.status(isNetwork ? 503 : 500).json({ 
+    res.status(isNetwork ? 503 : 500).json({
       error: isNetwork ? 'Supabase network error while fetching conversation' : error.message,
       hint: isNetwork ? 'Verify SUPABASE_URL/SUPABASE_ANON_KEY and internet connectivity on the server' : undefined
     });

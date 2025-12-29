@@ -6,6 +6,7 @@ import { CRYPTO_EXPERT_PROMPT } from "../prompts/cryptoexpert.js";
 import { PORTFOLIO_EXPERT_PROMPT as INVESTMENT_EXPERT_PROMPT } from "../prompts/investmentexpert.js";
 import { STOCK_EXPERT_PROMPT } from "../prompts/stockexpert.js";
 import { RETIREMENT_TAX_EXPERT_PROMPT } from "../prompts/retierment_tax_expert.js";
+import { generateExcalidrawFlowchart } from "./groq.js";
 
 import env from "../config/env.js";
 
@@ -22,17 +23,17 @@ const EXPERT_PROMPTS = {
 
 const GEMINI_API_KEYS = [
   env.GEMINI_API_KEY,
-  env.GEMINI_API_KEY2 
+  env.GEMINI_API_KEY2
 ].filter(Boolean);
 
-export const MODEL_ID = "gemini-2.5-flash";
+export const MODEL_ID = "gemini-2.5-flash-lite";
 export const GENERATE_CONTENT_API = "generateContent";
 export const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
 // Configuration constants
 const CONFIG = {
   MAX_HISTORY_LENGTH: 10,
-  MAX_OUTPUT_TOKENS: 65536, 
+  MAX_OUTPUT_TOKENS: 65536,
   MAX_USERS: 100,
   RETRY_DELAY: 1000, //1ms
   REQUEST_TIMEOUT: 60000,
@@ -40,17 +41,31 @@ const CONFIG = {
   MAX_TITLE_LENGTH: 100, // Maximum title length
 };
 
-const MERMAID_SYSTEM_RULES = [
-  'When you include Mermaid diagrams, you must follow these rules:',
-  '- Keep all normal explanation text outside of code fences.',
-  '- If you use Mermaid, wrap the diagram in exactly one fenced block using ```mermaid on its own line, and ``` on its own closing line.',
-  '- Do not include any comments, markdown, or explanations inside the mermaid block – only valid Mermaid syntax.',
-  '- Avoid unsupported Mermaid features: no click events, no linkStyle, no style sections, no classDef or class assignments, no markdown or HTML inside nodes.',
-  '- Keep diagrams lightweight: short node labels, simple shapes, mostly linear layout, and generally no more than about 10 nodes unless the user explicitly asks for more.',
-  '- Allowed diagram types: flowcharts with graph TD or graph LR, sequence diagrams, state diagrams, pie charts, and simple ER diagrams.',
-  '- Do not emit more than one mermaid fenced block in a single answer unless the user explicitly asks for multiple diagrams.',
-  '- Make sure the Mermaid code is syntactically valid and could render in standard Mermaid tools.',
-].join('\n');
+// Excalidraw flowchart generation function declaration for Gemini
+const EXCALIDRAW_FUNCTION_DECLARATION = {
+  name: "generate_excalidraw_flowchart",
+  description: "Generate an interactive diagram using Excalidraw. Use this function when the user asks for ANY type of diagram, chart, flowchart, visual representation, or graphical illustration including: flowcharts, process diagrams, workflow diagrams, use case diagrams, sequence diagrams, system architecture diagrams, data flow diagrams, mind maps, organizational charts, network diagrams, or any visual representation of concepts, processes, or relationships. This function returns Excalidraw-compatible JSON that renders as an interactive, editable diagram.",
+  parameters: {
+    type: "object",
+    properties: {
+      prompt: {
+        type: "string",
+        description: "Detailed description of the diagram to generate. Include all elements, relationships, flow direction, and labels. Be specific about what to show. Examples: 'User authentication flow with login and signup', 'E-commerce checkout process', 'Use case diagram for banking app with actors and use cases', 'System architecture showing frontend, backend, and database', 'Class diagram for e-commerce system'"
+      },
+      style: {
+        type: "string",
+        description: "Visual style preference for the diagram",
+        enum: ["minimal", "modern", "detailed"]
+      },
+      complexity: {
+        type: "string",
+        description: "Complexity level of the diagram",
+        enum: ["simple", "moderate", "detailed"]
+      }
+    },
+    required: ["prompt"]
+  }
+};
 
 // Retryable HTTP status codes
 const RETRYABLE_STATUS_CODES = new Set([429, 502, 503, 504]);
@@ -109,7 +124,7 @@ class APIKeyManager {
 
   getNextAvailableKey() {
     const now = Date.now();
-    
+
     // Reset failed keys that are ready for retry
     for (const [keyIndex, retryTime] of this.keyRetryTime.entries()) {
       if (now >= retryTime) {
@@ -165,18 +180,18 @@ async function fetchPageTitle(url) {
     }
 
     const html = await response.text();
-    
+
     // Extract title using regex (simple but effective for most cases)
     const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
     let title = titleMatch ? titleMatch[1].trim() : '';
-    
+
     // Clean up title
     if (title) {
       title = title
         .replace(/\s+/g, ' ') // Replace multiple spaces with single space
         .replace(/[\r\n\t]/g, ' ') // Replace newlines and tabs with spaces
         .trim();
-      
+
       // Truncate if too long
       if (title.length > CONFIG.MAX_TITLE_LENGTH) {
         title = title.substring(0, CONFIG.MAX_TITLE_LENGTH - 3) + '...';
@@ -195,11 +210,11 @@ async function fetchPageTitle(url) {
 
     // Cache the result
     titleCache.set(url, title);
-    
+
     return title;
   } catch (error) {
     console.warn(`Failed to fetch title for ${url}:`, error.message);
-    
+
     // Fallback to domain name
     try {
       const urlObj = new URL(url);
@@ -244,9 +259,9 @@ async function processSourcesWithTitles(sources) {
           const url = batch[index];
           try {
             const urlObj = new URL(url);
-            processedSources.push({ 
-              url, 
-              title: urlObj.hostname.replace(/^www\./, '') 
+            processedSources.push({
+              url,
+              title: urlObj.hostname.replace(/^www\./, '')
             });
           } catch (e) {
             processedSources.push({ url, title: 'Link' });
@@ -259,9 +274,9 @@ async function processSourcesWithTitles(sources) {
       batch.forEach(url => {
         try {
           const urlObj = new URL(url);
-          processedSources.push({ 
-            url, 
-            title: urlObj.hostname.replace(/^www\./, '') 
+          processedSources.push({
+            url,
+            title: urlObj.hostname.replace(/^www\./, '')
           });
         } catch (e) {
           processedSources.push({ url, title: 'Link' });
@@ -273,7 +288,7 @@ async function processSourcesWithTitles(sources) {
 }
 
 async function processGeminiResponse(response) {
-  const result = { content: '', sources: new Set(), codeSnippets: [], executionOutputs: [] };
+  const result = { content: '', sources: new Set(), codeSnippets: [], executionOutputs: [], functionCalls: [] };
 
   try {
     // Handle streaming response (array of chunks) vs single response
@@ -296,7 +311,7 @@ async function processGeminiResponse(response) {
           console.warn('Prompt feedback:', chunk.promptFeedback);
           if (chunk.promptFeedback.blockReason) {
             result.content = `Content blocked: ${chunk.promptFeedback.blockReason}`;
-            return { content: result.content, sources: [], codeSnippets: [], executionOutputs: [] };
+            return { content: result.content, sources: [], codeSnippets: [], executionOutputs: [], functionCalls: [] };
           }
         }
         continue;
@@ -322,8 +337,17 @@ async function processGeminiResponse(response) {
           console.log(`Chunk ${i + 1} added ${chunkContent.length} characters`);
         }
 
-        // Capture executable code and code execution results when present
+        // Capture function calls (e.g., Excalidraw flowchart generation)
         for (const part of parts) {
+          if (part.functionCall) {
+            console.log('Function call detected:', part.functionCall);
+            result.functionCalls.push({
+              name: part.functionCall.name,
+              args: part.functionCall.args
+            });
+          }
+
+          // Capture executable code and code execution results when present
           if (part.executableCode && typeof part.executableCode.code === 'string') {
             result.codeSnippets.push({
               language: part.executableCode.language || 'unknown',
@@ -352,11 +376,11 @@ async function processGeminiResponse(response) {
     // Check final finish reason for blocking
     if (lastFinishReason === 'SAFETY') {
       result.content = 'Response blocked due to safety filters';
-      return { content: result.content, sources: [], codeSnippets: [], executionOutputs: [] };
+      return { content: result.content, sources: [], codeSnippets: [], executionOutputs: [], functionCalls: [] };
     }
     if (lastFinishReason === 'RECITATION') {
       result.content = 'Response blocked due to recitation concerns';
-      return { content: result.content, sources: [], codeSnippets: [], executionOutputs: [] };
+      return { content: result.content, sources: [], codeSnippets: [], executionOutputs: [], functionCalls: [] };
     }
 
     // If we have content, extract URLs (markdown links and plain URLs) into sources
@@ -391,18 +415,44 @@ async function processGeminiResponse(response) {
     // Process sources with titles
     const processedSources = await processSourcesWithTitles(result.sources);
 
-    console.log('Final processing result:', { 
-      contentLength: result.content?.length || 0, 
+    // Execute function calls if any (e.g., Excalidraw flowchart generation)
+    const excalidrawData = [];
+    for (const functionCall of result.functionCalls) {
+      if (functionCall.name === 'generate_excalidraw_flowchart') {
+        try {
+          console.log('Executing Excalidraw flowchart generation:', functionCall.args);
+          const flowchartData = await generateExcalidrawFlowchart(
+            functionCall.args.prompt,
+            {
+              style: functionCall.args.style || 'modern',
+              complexity: functionCall.args.complexity || 'detailed'
+            }
+          );
+          excalidrawData.push(flowchartData);
+          console.log('Excalidraw flowchart generated successfully');
+        } catch (error) {
+          console.error('Error generating Excalidraw flowchart:', error);
+          result.content += `\n\n[Note: Failed to generate flowchart: ${error.message}]`;
+        }
+      }
+    }
+
+    console.log('Final processing result:', {
+      contentLength: result.content?.length || 0,
       sourcesCount: processedSources.length,
       hasValidContent,
-      lastFinishReason
+      lastFinishReason,
+      functionCallsCount: result.functionCalls.length,
+      excalidrawCount: excalidrawData.length
     });
 
     return {
       content: result.content,
       sources: processedSources,
       codeSnippets: result.codeSnippets,
-      executionOutputs: result.executionOutputs
+      executionOutputs: result.executionOutputs,
+      functionCalls: result.functionCalls,
+      excalidrawData: excalidrawData.length > 0 ? excalidrawData : undefined
     };
 
   } catch (error) {
@@ -411,7 +461,8 @@ async function processGeminiResponse(response) {
       content: `Error processing response: ${error.message}`,
       sources: [],
       codeSnippets: [],
-      executionOutputs: []
+      executionOutputs: [],
+      functionCalls: []
     };
   }
 }
@@ -421,7 +472,7 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
     contents: messages,
 
     generationConfig: {
-      temperature: 0, 
+      temperature: 0.1,  // Increased from 0 to make function calling more likely
       topP: 0.95,
       topK: 40,
       maxOutputTokens: CONFIG.MAX_OUTPUT_TOKENS,
@@ -434,16 +485,16 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
         threshold: "BLOCK_ONLY_HIGH"
       },
       {
-        category: "HARM_CATEGORY_HATE_SPEECH", 
-        threshold: "BLOCK_ONLY_HIGH" 
+        category: "HARM_CATEGORY_HATE_SPEECH",
+        threshold: "BLOCK_ONLY_HIGH"
       },
       {
         category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-        threshold: "BLOCK_ONLY_HIGH" 
+        threshold: "BLOCK_ONLY_HIGH"
       },
       {
         category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-        threshold: "BLOCK_ONLY_HIGH" 
+        threshold: "BLOCK_ONLY_HIGH"
       }
     ]
   };
@@ -453,11 +504,11 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
     // Ensure system instruction is given highest priority
     body.systemInstruction = {
       role: 'system',
-      parts: [{ 
+      parts: [{
         text: systemPrompt + "\n\nRemember: Follow all instructions exactly as given, including response formatting requirements."
       }]
     };
-    
+
     // Also add as the first message to reinforce the instruction
     if (body.contents && body.contents.length > 0) {
       body.contents = [
@@ -470,13 +521,12 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
     }
   }
 
-  if (includeSearch) {
-    body.tools = body.tools || [];
-    body.tools.push({ urlContext: {} });
-    body.tools.push({ googleSearch: {} });
-  }
+  body.tools = [];
+  body.tools.push({
+    functionDeclarations: [EXCALIDRAW_FUNCTION_DECLARATION]
+  });
 
-  console.log('Built request body:', JSON.stringify(body, null, 2));
+  console.log('Built request body with function calling (search disabled):', JSON.stringify(body, null, 2));
   return body;
 }
 
@@ -495,12 +545,9 @@ async function fetchWithTimeout(url, options, timeout = CONFIG.REQUEST_TIMEOUT) 
   }
 }
 
-// Initialize singletons
 const chatHistory = new ChatHistoryManager();
 const keyManager = new APIKeyManager(GEMINI_API_KEYS);
 
-// Minimal upload helpers to extract text from supported files and images for inlineData
-// Try to parse PDF buffers using pdf-parse if available
 async function parsePdfBuffer(buf) {
   try {
     const mod = await import('pdf-parse');
@@ -513,7 +560,6 @@ async function parsePdfBuffer(buf) {
   }
 }
 
-// Try to parse DOCX using mammoth if available
 async function parseDocxBuffer(buf) {
   try {
     const mod = await import('mammoth');
@@ -526,7 +572,6 @@ async function parseDocxBuffer(buf) {
   }
 }
 
-// Try to parse spreadsheets (xls/xlsx) using xlsx if available
 async function parseSpreadsheetBuffer(buf) {
   try {
     const mod = await import('xlsx');
@@ -552,7 +597,7 @@ async function parseSpreadsheetBuffer(buf) {
 export async function extractTextFromUploads(files = []) {
   if (!Array.isArray(files) || files.length === 0) return '';
   const parts = [];
-  const MAX_TOTAL_CHARS = 50000; // safety cap to avoid overly long prompts
+  const MAX_TOTAL_CHARS = 50000;
   let total = 0;
   for (const f of files) {
     try {
@@ -587,8 +632,6 @@ export async function extractTextFromUploads(files = []) {
         console.warn('PowerPoint files are accepted but text extraction is not implemented.');
         text = '';
       } else {
-        // Not implementing heavy parsers here; gracefully skip unsupported
-        // Fallback by basic extension check for .pdf
         const lower = (name || '').toLowerCase();
         if (!text && lower.endsWith('.pdf')) {
           text = await parsePdfBuffer(buf);
@@ -602,7 +645,6 @@ export async function extractTextFromUploads(files = []) {
       }
 
       if (text) {
-        // Truncate incrementally to the cap
         const remaining = Math.max(0, MAX_TOTAL_CHARS - total);
         const snippet = text.length > remaining ? text.slice(0, remaining) : text;
         if (snippet.length > 0) {
@@ -615,7 +657,6 @@ export async function extractTextFromUploads(files = []) {
         }
       }
     } catch (e) {
-      // ignore single file errors
     }
   }
   return parts.join('');
@@ -652,15 +693,15 @@ export async function extractImagesFromUploads(files = []) {
  * @returns {Promise<Object>} The generated content response
  */
 export async function generateContent(
-  prompt, 
+  prompt,
   userId = 'default',
   options = {}
 ) {
   console.log('generateContent called with:', { prompt, userId, options });
 
-  
+
   const startTime = Date.now();
-  
+
   try {
     // Select the appropriate system prompt based on expert type
     const expertType = (options.expert || 'research').toLowerCase();
@@ -680,9 +721,8 @@ export async function generateContent(
       }
     }
 
-    if (selectedSystemPrompt && typeof selectedSystemPrompt === 'string') {
-      selectedSystemPrompt = `${selectedSystemPrompt}\n\n${MERMAID_SYSTEM_RULES}`;
-    }
+    // System prompt is used as-is without Mermaid rules
+    // Flowcharts are now generated via function calling
 
     // Get user history and prepare messages
     const userHistory = chatHistory.get(userId);
@@ -720,7 +760,7 @@ export async function generateContent(
     };
 
     let messages = [...userHistory, userMessage];
-    
+
     // Ensure we don't exceed max history length and only include valid roles
     const validMessages = messages.filter(m => m.role === 'user' || m.role === 'model');
     messages = validMessages.slice(-(CONFIG.MAX_HISTORY_LENGTH * 2));
@@ -733,7 +773,7 @@ export async function generateContent(
     // Retry logic with exponential backoff
     while (attemptsCount < maxAttempts) {
       const keyInfo = keyManager.getNextAvailableKey();
-      
+
       if (!keyInfo) {
         lastError = new Error('All API keys are currently unavailable');
         break;
@@ -744,10 +784,10 @@ export async function generateContent(
 
       try {
         const url = `${BASE_URL}/${MODEL_ID}:${GENERATE_CONTENT_API}?key=${keyInfo.key}`;
-        
+
         const response = await fetchWithTimeout(url, {
           method: 'POST',
-          headers: { 
+          headers: {
             'Content-Type': 'application/json',
             'User-Agent': 'Research-Assistant/1.0'
           },
@@ -762,34 +802,34 @@ export async function generateContent(
           console.error('Failed to parse response as JSON:', err);
           return { error: { message: 'Invalid JSON response' } };
         });
-        
+
         console.log('Raw response data:', JSON.stringify(data, null, 2));
-        
+
         if (!response.ok) {
           const error = new Error(data?.error?.message || `HTTP ${response.status}: ${response.statusText}`);
-          
+
           // Handle retryable errors
           if (RETRYABLE_STATUS_CODES.has(response.status)) {
             console.warn(`Retryable error (${response.status}), trying next key...`);
             keyManager.markKeyFailed(keyInfo.index, response.status === 429 ? 300000 : 60000);
             keyManager.rotateKey();
-            
+
             if (attemptsCount < maxAttempts) {
               await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_DELAY * attemptsCount));
               continue;
             }
           }
-          
+
           throw error;
         }
-        
+
         // Process successful response
         const result = await processGeminiResponse(data);
-        
+
         // Check if we got empty content and handle it
         if (!result.content || result.content.trim().length === 0) {
           console.warn('Received empty content from API');
-          
+
           // If we have attempts left and this might be a temporary issue, retry
           if (attemptsCount < maxAttempts) {
             console.log('Retrying due to empty content...');
@@ -802,14 +842,14 @@ export async function generateContent(
             result.warning = 'EMPTY_CONTENT';
           }
         }
-        
+
         // Update chat history only on successful response with content
         if (result.content?.trim()) {
           const updatedHistory = [...userHistory];
-          
+
           // Add user message
           updatedHistory.push(userMessage);
-          
+
           // Add assistant response
           updatedHistory.push({
             role: 'model',
@@ -820,35 +860,35 @@ export async function generateContent(
           if (updatedHistory.length > CONFIG.MAX_HISTORY_LENGTH * 2) {
             updatedHistory.splice(0, updatedHistory.length - (CONFIG.MAX_HISTORY_LENGTH * 2));
           }
-          
+
           chatHistory.set(userId, updatedHistory);
         }
-        
+
         // Add metadata
         result.timestamp = new Date().toISOString();
         result.processingTime = Date.now() - startTime;
         result.attempts = attemptsCount;
-        
+
         console.log(`Request completed successfully in ${result.processingTime}ms`);
         return result;
-        
+
       } catch (error) {
         lastError = error;
         console.error(`Attempt ${attemptsCount} failed:`, error.message);
-        
+
         // For non-retryable errors, break immediately
         if (!error.message.includes('timeout') && !error.message.includes('fetch')) {
           break;
         }
-        
+
         keyManager.rotateKey();
-        
+
         if (attemptsCount < maxAttempts) {
           await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_DELAY * attemptsCount));
         }
       }
     }
-    
+
     // All attempts failed
     console.error('All attempts failed:', lastError);
     return {
@@ -859,7 +899,7 @@ export async function generateContent(
       attempts: attemptsCount,
       error: 'API_FAILURE'
     };
-    
+
   } catch (error) {
     console.error('Unexpected error in generateContent:', error);
     return {

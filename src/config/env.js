@@ -5,11 +5,11 @@ if (process.env.NODE_ENV !== 'production') {
   const path = await import('path');
   const { fileURLToPath } = await import('node:url');
   const fs = await import('fs');
-  
+
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
   const envPath = path.resolve(__dirname, '../../.env');
-  
+
   if (fs.existsSync(envPath)) {
     const result = dotenv.config({ path: envPath });
     if (result.error) {
@@ -22,7 +22,7 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // Verify required environment variables
-const requiredEnvVars = ['GEMINI_API_KEY', 'GEMINI_API_KEY2', 'SUPABASE_URL', 'SUPABASE_ANON_KEY'];
+const requiredEnvVars = ['GEMINI_API_KEY', 'GEMINI_API_KEY2', 'SUPABASE_URL', 'SUPABASE_ANON_KEY', 'GROQ_KEY'];
 const missingVars = requiredEnvVars.filter(varName => !process.env[varName]?.trim());
 
 if (missingVars.length > 0) {
@@ -42,6 +42,7 @@ console.log(`- NODE_ENV: ${process.env.NODE_ENV || 'development'}`);
 console.log(`- GEMINI_API_KEY: ${process.env.GEMINI_API_KEY ? '✅ set' : '❌ not set'}`);
 console.log(`- GEMINI_API_KEY2: ${process.env.GEMINI_API_KEY2 ? '✅ set' : '❌ not set'}`);
 console.log(`- SUPABASE_URL: ${process.env.SUPABASE_URL ? '✅ set' : '❌ not set'}`);
+console.log(`- GROQ_KEY: ${process.env.GROQ_KEY ? '✅ set' : '❌ not set'}`);
 console.log('='.repeat(50) + '\n');
 
 // Export environment variables

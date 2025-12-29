@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import geminiRouter from "./routers/geminiRouter.js";
 import userRouter from "./routers/userRouter.js";
-import chatRouter from "./routers/chatRouter.js"; 
+import chatRouter from "./routers/chatRouter.js";
 import speechRouter from "./routers/speechRouter.js";
 import { createUploadsDir } from "./utils/fileUpload.js";
 import uploadRouter from "./routers/uploadRouter.js";
@@ -18,9 +18,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 //env
 const envPaths = [
-  join(__dirname, '..', '.env'),     
-  join(__dirname, '.env'),           
-  join(process.cwd(), '.env')        
+  join(__dirname, '..', '.env'),
+  join(__dirname, '.env'),
+  join(process.cwd(), '.env')
 ];
 
 let envLoaded = false;
@@ -29,8 +29,8 @@ for (const envPath of envPaths) {
     const result = dotenv.config({ path: envPath });
     if (!result.error) {
       console.log('Successfully loaded .env from:', envPath);
-    console.log('GEMINI_API_KEY is set:', !!process.env.GEMINI_API_KEY);
-    envLoaded = true;
+      console.log('GEMINI_API_KEY is set:', !!process.env.GEMINI_API_KEY);
+      envLoaded = true;
       break;
     }
   } catch (e) {
@@ -63,27 +63,32 @@ const app = express();
 
 // CORS configuration
 const allowedOrigins = [
-  'http://localhost:3000', // Development
+  'http://localhost:3000', // Development (removed trailing slash)
   'http://localhost:8080', // Localhost
   'https://lunnaa.vercel.app' //Lunna
 ];
+
 // Enable CORS for all routes
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  
-  // Check if the request origin is in the allowed origins
-  if (allowedOrigins.includes(origin)) {
+
+  // In development, allow all localhost origins
+  const isDevelopment = process.env.NODE_ENV !== 'production';
+  const isLocalhost = origin && (origin.includes('localhost') || origin.includes('127.0.0.1'));
+
+  // Check if the request origin is in the allowed origins or is localhost in dev
+  if (allowedOrigins.includes(origin) || (isDevelopment && isLocalhost)) {
     res.header('Access-Control-Allow-Origin', origin);
     res.header('Access-Control-Allow-Credentials', 'true');
   }
-  
+
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
     return res.status(200).end();
   }
-  
+
   next();
 });
 app.use(express.json());

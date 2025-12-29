@@ -5,6 +5,7 @@ import { uploadArray } from "../middleware/upload.js";
 import { authenticate, requireAuth } from "../middleware/auth.js";
 import { handleChatGenerate, handleChatStreamGenerate, getConversations, getConversationHistory, deleteConversation } from "../controllers/chatController.js";
 import { handleChartsGenerate, handleChatWithChartsParallel } from "../controllers/chartsController.js";
+import { handleExcalidrawGenerate, handleFlowchartDescribe, handleExcalidrawHealth } from "../controllers/excalidrawController.js";
 
 const router = express.Router();
 
@@ -23,5 +24,10 @@ router.post("/charts", authenticate, requireAuth, uploadArray, handleChartsGener
 
 // Parallel: run chat and charts simultaneously and return combined payload
 router.post("/chat-with-charts", authenticate, requireAuth, uploadArray, handleChatWithChartsParallel);
+
+// Excalidraw flowchart generation using Groq
+router.post("/excalidraw/generate", authenticate, requireAuth, handleExcalidrawGenerate);
+router.post("/excalidraw/describe", authenticate, requireAuth, handleFlowchartDescribe);
+router.get("/excalidraw/health", handleExcalidrawHealth);
 
 export default router;
