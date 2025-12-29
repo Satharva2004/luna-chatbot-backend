@@ -26,7 +26,7 @@ const GEMINI_API_KEYS = [
   env.GEMINI_API_KEY2
 ].filter(Boolean);
 
-export const MODEL_ID = "gemini-2.5-flash-lite";
+export const MODEL_ID = "gemini-2.5-flash";
 export const GENERATE_CONTENT_API = "generateContent";
 export const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -806,12 +806,22 @@ export async function generateContent(
         console.log('Raw response data:', JSON.stringify(data, null, 2));
 
         if (!response.ok) {
-          const error = new Error(data?.error?.message || `HTTP ${response.status}: ${response.statusText}`);
+          const errorMessage = data?.error?.message || `HTTP ${response.status}: ${response.statusText}`;
+          const error = new Error(errorMessage);
 
-          // Handle retryable errors
-          if (RETRYABLE_STATUS_CODES.has(response.status)) {
-            console.warn(`Retryable error (${response.status}), trying next key...`);
-            keyManager.markKeyFailed(keyInfo.index, response.status === 429 ? 300000 : 60000);
+          // Handle retryable errors or specific quota/resource exhausted messages
+          // Gemini sometimes matches these patterns even if status isn't strictly 429
+          const isQuotaError =
+            response.status === 429 ||
+            errorMessage.toLowerCase().includes('quota') ||
+            errorMessage.toLowerCase().includes('exhausted') ||
+            errorMessage.toLowerCase().includes('resource has been exhausted');
+
+          if (isQuotaError || RETRYABLE_STATUS_CODES.has(response.status)) {
+            console.warn(`Retryable error (${response.status} - ${errorMessage}), trying next key...`);
+
+            // Mark key as failed for a simpler 1 minute if it's just a flake, or 5 mins if quota
+            keyManager.markKeyFailed(keyInfo.index, isQuotaError ? 300000 : 60000);
             keyManager.rotateKey();
 
             if (attemptsCount < maxAttempts) {

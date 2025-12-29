@@ -203,7 +203,7 @@ export async function handleChatGenerate(req, res) {
     // Get last 10 messages for context
     const { data: messages, error: historyError } = await supabase
       .from('messages')
-      .select('role, content, sources, images, videos')
+      .select('role, content, sources, images, videos, excalidraw')
       .eq('conversation_id', currentConversationId)
       .order('created_at', { ascending: false })
       .limit(10);
@@ -276,7 +276,7 @@ export async function handleChatGenerate(req, res) {
           content: finalContent,
           sources: aiSources,
           images: imageResults.length > 0 ? imageResults : null,
-          excalidraw_data: aiExcalidrawData // Store in database
+          excalidraw: aiExcalidrawData // Store in new column
         }
       ]);
 
@@ -336,6 +336,7 @@ export async function handleChatStreamGenerate(req, res) {
     let streamedContent = '';
     const streamedSources = new Set();
     let finalSourcesWithTitles = []; // Store final sources to save to DB
+    let streamedExcalidrawData = []; // Capture generated charts
     let streamComplete = false; // Track if we received finishReason: "STOP"
     let lastFinishReason = null; // Store the finish reason for validation
     // After getting the userId from req.userId
@@ -546,6 +547,9 @@ export async function handleChatStreamGenerate(req, res) {
                     }
                   );
 
+                  // Capture for DB save
+                  streamedExcalidrawData.push(flowchartData);
+
                   // Emit excalidraw event
                   res.write(`event: excalidraw\n`);
                   res.write(`data: ${JSON.stringify({ excalidrawData: [flowchartData] })}\n\n`);
@@ -729,7 +733,8 @@ export async function handleChatStreamGenerate(req, res) {
               content: streamedContent,
               sources: finalSourcesWithTitles,
               images: imageResults,
-              videos: youtubeVideos.length > 0 ? youtubeVideos : null
+              videos: youtubeVideos.length > 0 ? youtubeVideos : null,
+              excalidraw: streamedExcalidrawData.length > 0 ? streamedExcalidrawData : null
             }
           ]);
 
@@ -839,7 +844,7 @@ export async function getConversationHistory(req, res) {
 
     const { data: messages, error: messagesError } = await supabase
       .from('messages')
-      .select('id, role, content, sources, charts, images, videos, created_at')
+      .select('id, role, content, sources, charts, images, videos, excalidraw, created_at')
       .eq('conversation_id', conversationId)
       .order('created_at', { ascending: true });
 

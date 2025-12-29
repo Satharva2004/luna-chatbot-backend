@@ -189,35 +189,43 @@ export async function generateExcalidrawFlowchart(prompt, options = {}) {
                 bgColor = COLORS.START_END;
             }
 
+            // Common defaults for all elements
+            const commonProps = {
+                version: 1,
+                versionNonce: 0,
+                isDeleted: false,
+                groupIds: [],
+                frameId: null,
+                boundElements: [],
+                updated: Date.now(),
+                link: null,
+                locked: false,
+                opacity: 100,
+                strokeColor: COLORS.STROKE,
+                strokeStyle: "solid",
+                strokeWidth: 2,
+                fillStyle: "solid",
+                roughness: 1,
+                seed: Math.floor(Math.random() * 100000),
+            };
+
             // Push Shape
             elements.push({
+                ...commonProps,
                 id: shapeId,
                 type: excalidrawType,
                 x: node.x,
                 y: node.y,
                 width: LAYOUT.NODE_WIDTH,
                 height: LAYOUT.NODE_HEIGHT,
-                strokeColor: COLORS.STROKE,
                 backgroundColor: bgColor,
-                fillStyle: "solid",
-                strokeWidth: 2,
-                strokeStyle: "solid",
-                roughness: 1,
-                opacity: 100,
-                groupIds: [],
                 roundness: roundness,
-                seed: Math.floor(Math.random() * 100000),
-                version: 1,
-                versionNonce: 0,
-                isDeleted: false,
-                boundElements: [{ id: textId, type: "text" }],
-                updated: Date.now(),
-                link: null,
-                locked: false,
+                boundElements: [{ id: textId, type: "text" }], // Bind text to shape
             });
 
             // Push Text
             elements.push({
+                ...commonProps,
                 id: textId,
                 type: "text",
                 x: node.x + 10,
@@ -231,21 +239,9 @@ export async function generateExcalidrawFlowchart(prompt, options = {}) {
                 verticalAlign: "middle",
                 containerId: shapeId, // CRITICAL: This auto-centers the text in Excalidraw
                 originalText: node.label || "",
-                strokeColor: COLORS.STROKE,
                 backgroundColor: "transparent",
-                fillStyle: "solid",
                 strokeWidth: 1,
-                strokeStyle: "solid",
                 roughness: 0,
-                opacity: 100,
-                groupIds: [],
-                seed: Math.floor(Math.random() * 100000),
-                version: 1,
-                versionNonce: 0,
-                isDeleted: false,
-                updated: Date.now(),
-                link: null,
-                locked: false,
             });
 
             // Push Arrows (Edges)
@@ -254,31 +250,22 @@ export async function generateExcalidrawFlowchart(prompt, options = {}) {
                     // Find target coordinates
                     const targetNode = layoutNodes.find(n => n.id === targetId);
                     if (targetNode) {
+                        // Calculate dimensions based on points
+                        const dx = targetNode.x - node.x;
+                        const dy = targetNode.y - node.y - LAYOUT.NODE_HEIGHT;
+
                         elements.push({
+                            ...commonProps,
                             id: `${node.id}-to-${targetId}`,
                             type: "arrow",
                             x: node.x + (LAYOUT.NODE_WIDTH / 2),
                             y: node.y + LAYOUT.NODE_HEIGHT,
-                            width: 0, // dynamic
-                            height: 0, // dynamic
-                            strokeColor: COLORS.STROKE,
+                            width: Math.abs(dx),
+                            height: Math.abs(dy),
                             backgroundColor: "transparent",
-                            fillStyle: "solid",
-                            strokeWidth: 2,
-                            strokeStyle: "solid",
-                            roughness: 1,
-                            opacity: 100,
-                            groupIds: [],
                             roundness: { type: 2 },
-                            seed: Math.floor(Math.random() * 100000),
-                            version: 1,
-                            versionNonce: 0,
-                            isDeleted: false,
-                            boundElements: null,
-                            updated: Date.now(),
-                            link: null,
-                            locked: false,
-                            points: [[0, 0], [targetNode.x - node.x, targetNode.y - node.y - LAYOUT.NODE_HEIGHT]],
+                            boundElements: [], // Arrows usually don't have bound elements initially here
+                            points: [[0, 0], [dx, dy]],
                             startBinding: { elementId: shapeId, focus: 0.5, gap: 4 },
                             endBinding: { elementId: targetId, focus: 0.5, gap: 4 },
                             endArrowhead: "arrow"
