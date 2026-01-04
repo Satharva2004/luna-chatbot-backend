@@ -1,14 +1,12 @@
-```javascript
 module.exports = {
     apps: [{
         name: "luna-backend",
-        script: "./src/server.js",
-        instances: "max",
-        exec_mode: "cluster",
+        script: "npm",
+        args: "run dev",
+        instances: 1,
+        exec_mode: "fork",
         env: {
-            NODE_ENV: "production",
+            NODE_ENV: "development",
         }
     }]
 }
-//testing
-```

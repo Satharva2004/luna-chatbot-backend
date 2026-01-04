@@ -46,8 +46,8 @@ jobs:
           # Assuming git is already initialized and remote is set since it's an existing deployment
           git pull origin main
 
-          # Install Dependencies
-          npm ci --omit=dev
+          # Install ALL Dependencies (including devDependencies like nodemon)
+          npm install
 
           # Start/Restart PM2
           # We use the specific name 'luna-backend' that is already running
