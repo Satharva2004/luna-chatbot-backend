@@ -1,0 +1,61 @@
+name: Cloud Server Deploy (PM2)
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Use Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    # - name: Run tests
+    #   run: npm test
+
+  deploy:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Deploy to Server via SSH
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.VPS_HOST }}       # Add this in GitHub Repo Settings > Secrets
+        username: ${{ secrets.VPS_USER }}   # Add this (e.g., ubuntu, root)
+        key: ${{ secrets.VPS_SSH_KEY }}     # Add your private SSH key
+        script: |
+          # Define your app path
+          APP_PATH="/home/ubuntu/luna-chatbot-backend" 
+          
+          # Navigate to App Directory
+          cd $APP_PATH
+          
+          # Pull latest changes
+          # Assuming git is already initialized and remote is set since it's an existing deployment
+          git pull origin main
+
+          # Install Dependencies
+          npm ci --omit=dev
+
+          # Start/Restart PM2
+          # We use the specific name 'luna-backend' that is already running
+          if pm2 list | grep -q "luna-backend"; then
+            pm2 reload luna-backend --update-env
+          else
+            pm2 start ecosystem.config.js --env production
+          fi
+          
+          # Save PM2 list so it restarts on reboot
+          pm2 save
