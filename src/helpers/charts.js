@@ -188,8 +188,28 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
   console.log('==========================');
 
   let chartPayload;
+  let parsed;
   try {
-    const parsed = JSON.parse(text);
+    parsed = JSON.parse(text);
+
+    // Check if the model explicitly decided no chart is needed
+    if (parsed && typeof parsed === 'object' && parsed.no_chart_needed === true) {
+      console.log('Model decided no chart is needed:', parsed.reason || 'No reason provided');
+      return {
+        ok: true,
+        chartConfig: null,
+        chartUrl: null,
+        quickChartSuccess: false,
+        raw: text,
+        error: null,
+        userMessage: null,
+        errorCode: null,
+        processingTime: Date.now() - start,
+        noChartNeeded: true,
+        reason: parsed.reason || null
+      };
+    }
+
     chartPayload = chartPayloadSchema.parse(parsed);
   } catch (error) {
     console.error('Gemini chart payload validation failed:', error);

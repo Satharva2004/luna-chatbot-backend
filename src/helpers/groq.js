@@ -16,11 +16,12 @@ const LAYOUT = {
 };
 
 const COLORS = {
-    START_END: "#dbeafe", // blue-100
-    PROCESS: "#f3f4f6",   // gray-100
-    DECISION: "#fef3c7",  // amber-100
-    STROKE: "#1e1e1e",
+    START_END: "#e0e7ff", // indigo-100
+    PROCESS: "#ffffff",   // white
+    DECISION: "#fff7ed",  // orange-50
+    STROKE: "#0f172a",    // slate-900
 };
+
 
 /**
  * Deterministic Layout Algorithm
@@ -203,9 +204,9 @@ export async function generateExcalidrawFlowchart(prompt, options = {}) {
                 opacity: 100,
                 strokeColor: COLORS.STROKE,
                 strokeStyle: "solid",
-                strokeWidth: 2,
+                strokeWidth: 2.5,
                 fillStyle: "solid",
-                roughness: 1,
+                roughness: 0,
                 seed: Math.floor(Math.random() * 100000),
             };
 
@@ -280,7 +281,7 @@ export async function generateExcalidrawFlowchart(prompt, options = {}) {
             version: 2,
             source: "https://excalidraw.com",
             elements: elements,
-            appState: { viewBackgroundColor: "#ffffff", gridSize: null },
+            appState: { viewBackgroundColor: "#f8fafc", gridSize: null },
             files: {}
         };
 
