@@ -178,8 +178,10 @@ export async function handleChatGenerate(req, res) {
       // Handle error or continue without username
     }
 
-    const username = userData?.username || '';
+    const username = userData?.username || 'User';
     const userEmail = userData?.email || '';
+
+    console.log('[handleChatGenerate] User info:', { userId, username, userEmail });
 
     // If no conversation ID provided, create a new conversation
     if (!currentConversationId) {
@@ -351,8 +353,10 @@ export async function handleChatStreamGenerate(req, res) {
       // Handle error or continue without username
     }
 
-    const username = userData?.username || 'Anonymous';
+    const username = userData?.username || 'User';
     const userEmail = userData?.email || '';
+
+    console.log('[handleChatStreamGenerate] User info:', { userId, username, userEmail });
     // If no conversation ID provided, create a new conversation
     if (!currentConversationId) {
       const { data: conversation, error: convError } = await supabase
