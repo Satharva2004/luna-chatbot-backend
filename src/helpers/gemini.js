@@ -26,7 +26,7 @@ const GEMINI_API_KEYS = [
   env.GEMINI_API_KEY2
 ].filter(Boolean);
 
-export const MODEL_ID = "gemini-2.5-flash";
+export const MODEL_ID = "gemini-2.5-flash-lite";
 export const GENERATE_CONTENT_API = "generateContent";
 export const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -522,11 +522,23 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
   }
 
   body.tools = [];
-  body.tools.push({
-    functionDeclarations: [EXCALIDRAW_FUNCTION_DECLARATION]
-  });
 
-  console.log('Built request body with function calling (search disabled):', JSON.stringify(body, null, 2));
+  // If search is requested, we prioritize it because combining custom functions
+  // with google_search can sometimes lead to "unsupported" errors even on Pro models.
+  if (includeSearch) {
+    body.tools.push({
+      google_search: {}
+    });
+    console.log(`[buildRequestBody] Enabling google_search (prioritized over function calling)`);
+  } else {
+    // Only add Excalidraw if search is NOT enabled to avoid incompatibility errors
+    body.tools.push({
+      function_declarations: [EXCALIDRAW_FUNCTION_DECLARATION]
+    });
+    console.log(`[buildRequestBody] Enabling function_declarations (Excalidraw)`);
+  }
+
+  console.log(`Built request body (search: ${includeSearch}, model: ${MODEL_ID}):`, JSON.stringify(body, null, 2));
   return body;
 }
 

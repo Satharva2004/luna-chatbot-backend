@@ -22,16 +22,11 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // Verify required environment variables
-const requiredEnvVars = ['GEMINI_API_KEY', 'GEMINI_API_KEY2', 'SUPABASE_URL', 'SUPABASE_ANON_KEY', 'GROQ_KEY'];
+const requiredEnvVars = ['GEMINI_API_KEY', 'SUPABASE_URL', 'SUPABASE_ANON_KEY', 'GROQ_KEY'];
 const missingVars = requiredEnvVars.filter(varName => !process.env[varName]?.trim());
 
 if (missingVars.length > 0) {
   console.error('❌ Missing required environment variables:', missingVars.join(', '));
-  if (process.env.NODE_ENV !== 'production') {
-    console.error('Please check your .env file at:', path.resolve(__dirname, '../../.env'));
-  } else {
-    console.error('Please set these environment variables in your Vercel project settings');
-  }
   process.exit(1);
 }
 

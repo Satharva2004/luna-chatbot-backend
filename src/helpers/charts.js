@@ -158,7 +158,7 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
   let response;
   try {
     response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-2.5-flash-lite',
       contents,
       config,
     });
