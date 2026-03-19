@@ -19,6 +19,118 @@ if (!youtubeMCP) {
 const STREAM_FINISH_DEBOUNCE_MS = 80;
 const STREAM_CLOSE_DELAY_MS = 60;
 const sleep = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+const FEATHERLESS_BASE_URL = env.FEATHERLESS_BASE_URL || 'https://api.featherless.ai/v1';
+const FEATHERLESS_MODEL_NAME = env.FEATHERLESS_MODEL_NAME || 'Qwen/Qwen2.5-7B-Instruct';
+
+function buildFallbackConversationTitle(prompt) {
+  const normalized = String(prompt || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return 'New chat';
+  }
+
+  return normalized.length > 52 ? `${normalized.slice(0, 49)}...` : normalized;
+}
+
+async function generateConversationTitle(prompt, answer = '') {
+  const apiKey = env.FEATHERLESS_API_KEY;
+  const fallbackTitle = buildFallbackConversationTitle(prompt);
+
+  if (!apiKey) {
+    return fallbackTitle;
+  }
+
+  const promptSnippet = String(prompt || '').replace(/\s+/g, ' ').trim();
+  const answerSnippet = String(answer || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+
+  if (!promptSnippet) {
+    return fallbackTitle;
+  }
+
+  try {
+    const completionPrompt = [
+      'Generate a short chat title for this conversation.',
+      'Rules:',
+      '- 3 to 6 words only',
+      '- no quotes',
+      '- no markdown',
+      '- concise, natural, title case',
+      '- summarize the user intent',
+      '',
+      `User: ${promptSnippet}`,
+      answerSnippet ? `Assistant: ${answerSnippet}` : '',
+      '',
+      'Title:'
+    ].filter(Boolean).join('\n');
+
+    const response = await fetch(`${FEATHERLESS_BASE_URL}/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: FEATHERLESS_MODEL_NAME,
+        prompt: completionPrompt,
+        max_tokens: 24,
+        temperature: 0.2
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Featherless HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    const rawTitle = typeof data?.choices?.[0]?.text === 'string'
+      ? data.choices[0].text
+      : typeof data?.text === 'string'
+        ? data.text
+        : '';
+
+    const cleanedTitle = rawTitle
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/^title\s*:\s*/i, '')
+      .replace(/^["'`]+|["'`]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!cleanedTitle) {
+      return fallbackTitle;
+    }
+
+    return cleanedTitle.length > 60 ? cleanedTitle.slice(0, 57).trimEnd() + '...' : cleanedTitle;
+  } catch (error) {
+    console.warn('[conversation-title] Failed to generate title:', error?.message || error);
+    return fallbackTitle;
+  }
+}
+
+async function updateConversationTitle(conversationId, prompt, answer = '') {
+  if (!conversationId) {
+    return null;
+  }
+
+  const title = await generateConversationTitle(prompt, answer);
+
+  try {
+    const { error } = await supabase
+      .from('conversations')
+      .update({
+        title,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', conversationId);
+
+    if (error) {
+      throw error;
+    }
+
+    return title;
+  } catch (error) {
+    console.error('[conversation-title] Failed to persist title:', error);
+    return null;
+  }
+}
 
 /**
  * Fetch page title from URL
@@ -184,12 +296,14 @@ export async function handleChatGenerate(req, res) {
     console.log('[handleChatGenerate] User info:', { userId, username, userEmail });
 
     // If no conversation ID provided, create a new conversation
+    const isNewConversation = !currentConversationId;
     if (!currentConversationId) {
+      const initialConversationTitle = await generateConversationTitle(prompt);
       const { data: conversation, error: convError } = await supabase
         .from('conversations')
         .insert({
           user_id: userId,
-          title: prompt.substring(0, 50) + (prompt.length > 50 ? '...' : '')
+          title: initialConversationTitle
         })
         .select()
         .single();
@@ -293,6 +407,10 @@ export async function handleChatGenerate(req, res) {
       .update({ updated_at: new Date().toISOString() })
       .eq('id', currentConversationId);
 
+    if (isNewConversation) {
+      void updateConversationTitle(currentConversationId, prompt, finalContent);
+    }
+
     const apiResponse = {
       content: finalContent,
       sources: aiSources,
@@ -358,12 +476,14 @@ export async function handleChatStreamGenerate(req, res) {
 
     console.log('[handleChatStreamGenerate] User info:', { userId, username, userEmail });
     // If no conversation ID provided, create a new conversation
+    const isNewConversation = !currentConversationId;
     if (!currentConversationId) {
+      const initialConversationTitle = await generateConversationTitle(prompt);
       const { data: conversation, error: convError } = await supabase
         .from('conversations')
         .insert({
           user_id: userId,
-          title: prompt.substring(0, 50) + (prompt.length > 50 ? '...' : '')
+          title: initialConversationTitle
         })
         .select()
         .single();
@@ -753,6 +873,10 @@ export async function handleChatStreamGenerate(req, res) {
           .from('conversations')
           .update({ updated_at: new Date().toISOString() })
           .eq('id', currentConversationId);
+
+        if (isNewConversation) {
+          void updateConversationTitle(currentConversationId, prompt, streamedContent);
+        }
 
       } catch (dbError) {
         console.error('Database error after streaming:', dbError);
