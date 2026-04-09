@@ -186,42 +186,70 @@ async function fetchPageTitle(url) {
 function buildContextualSearchQuery({ prompt, history, extra, maxLength = 200 }) {
   const trimmedPrompt = typeof prompt === 'string' ? prompt.trim() : '';
   const extraText = typeof extra === 'string' ? extra.trim() : '';
-  const userSnippets = [];
-  const assistantSnippets = [];
+  const normalize = (value = '') => String(value)
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/[`*_>#-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const recentUserPrompts = [];
+
   if (Array.isArray(history) && history.length) {
-    const chronological = [...history].reverse();
-    for (let i = chronological.length - 1; i >= 0; i -= 1) {
-      const message = chronological[i];
-      const text = typeof message?.content === 'string' ? message.content.trim() : '';
+    for (const message of history) {
+      const text = normalize(message?.content);
       if (!text) {
         continue;
       }
-      if (message.role === 'user' && userSnippets.length < 2) {
-        userSnippets.push(text);
-      } else if (message.role === 'model' && assistantSnippets.length < 1) {
-        assistantSnippets.push(text);
+
+      if (message.role === 'user') {
+        recentUserPrompts.push(text);
       }
-      if (userSnippets.length >= 2 && assistantSnippets.length >= 1) {
+
+      if (recentUserPrompts.length >= 4) {
         break;
       }
     }
   }
+
+  const latestTopic = recentUserPrompts[0] || '';
+  const previousTopic = recentUserPrompts[1] || '';
+  const cleanPrompt = normalize(trimmedPrompt);
+  const lowerPrompt = cleanPrompt.toLowerCase();
+  const isContextDependentPrompt =
+    cleanPrompt.length < 24 ||
+    /^(more|continue|go on|what else|next|another|again|same|that|this|these|those)\b/i.test(cleanPrompt) ||
+    /\b(more|deeper|advanced|examples|resources|videos|video|images|image|tutorials|tutorial|courses|books|docs|documentation|roadmap)\b/i.test(lowerPrompt);
+
   const segments = [];
-  segments.push(...userSnippets.reverse(), ...assistantSnippets.reverse());
+
+  if (isContextDependentPrompt && latestTopic) {
+    segments.push(latestTopic);
+    if (previousTopic && previousTopic.toLowerCase() !== latestTopic.toLowerCase()) {
+      segments.push(previousTopic);
+    }
+    if (cleanPrompt && cleanPrompt.toLowerCase() !== latestTopic.toLowerCase()) {
+      segments.push(cleanPrompt);
+    }
+  } else if (cleanPrompt) {
+    segments.push(cleanPrompt);
+    if (latestTopic && latestTopic.toLowerCase() !== cleanPrompt.toLowerCase()) {
+      segments.push(latestTopic);
+    }
+  } else if (latestTopic) {
+    segments.push(latestTopic);
+  }
+
   if (extraText) {
-    segments.push(extraText);
+    segments.push(normalize(extraText));
   }
-  if (trimmedPrompt) {
-    segments.push(trimmedPrompt);
-  }
-  const normalized = segments
-    .map((segment) => segment.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-  if (!normalized.length) {
-    return '';
-  }
-  const combined = normalized.join(' | ');
-  return combined.length > maxLength ? combined.slice(0, maxLength) : combined;
+
+  const combined = segments
+    .filter(Boolean)
+    .join(' | ')
+    .slice(0, maxLength)
+    .trim();
+
+  return combined;
 }
 
 /**
