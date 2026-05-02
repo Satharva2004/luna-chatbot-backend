@@ -1,7 +1,20 @@
 // src/controllers/chatController.js
 import fetch from 'node-fetch';
 import { createClient } from '@supabase/supabase-js';
-import { generateContent, buildRequestBody, MODEL_ID, BASE_URL, extractTextFromUploads, extractImagesFromUploads } from '../helpers/gemini.js';
+import {
+  generateContent,
+  buildRequestBody,
+  MODEL_ID,
+  BASE_URL,
+  extractTextFromUploads,
+  extractImagesFromUploads,
+  getGeminiMaxAttempts,
+  getNextGeminiApiKey,
+  isRetryableGeminiError,
+  markGeminiApiKeyFailed,
+  markGeminiApiKeyHealthy,
+  rotateGeminiApiKey,
+} from '../helpers/gemini.js';
 import { searchImages } from '../helpers/imageSearch.js';
 import { RESEARCH_ASSISTANT_PROMPT } from '../prompts/researchAssistantPrompt.js';
 import YouTubeMCP from '../helpers/youtubeSearch.js';
@@ -252,13 +265,295 @@ function buildContextualSearchQuery({ prompt, history, extra, maxLength = 200 })
   return combined;
 }
 
+const SEARCH_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'can', 'could', 'for', 'from',
+  'give', 'get', 'hai', 'he', 'her', 'his', 'how', 'i', 'in', 'is', 'it', 'its',
+  'ka', 'ke', 'ki', 'ko', 'me', 'mein', 'of', 'on', 'or', 'please', 'provide',
+  'show', 'tell', 'that', 'the', 'their', 'this', 'to', 'what', 'when', 'where',
+  'who', 'why', 'with', 'you', 'your'
+]);
+
+function normalizeSearchText(value = '') {
+  return String(value)
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/[`*_>#|()[\]{}"'“”‘’]/g, ' ')
+    .replace(/[?!,:;]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function searchTokens(query = '') {
+  return Array.from(new Set(
+    normalizeSearchText(query)
+      .toLowerCase()
+      .split(/\s+/)
+      .map(token => token.replace(/[^a-z0-9]+/gi, ''))
+      .filter(token => token.length > 2 && !SEARCH_STOP_WORDS.has(token))
+  ));
+}
+
+function latestUserTopic(history = []) {
+  if (!Array.isArray(history)) {
+    return '';
+  }
+
+  for (const message of history) {
+    if (message?.role !== 'user') {
+      continue;
+    }
+
+    const text = normalizeSearchText(message.content);
+    if (!text) {
+      continue;
+    }
+
+    const isMediaOnlyFollowUp =
+      text.length < 40 &&
+      /\b(more|another|again|same|that|this|these|those|image|images|photo|photos|picture|pictures|video|videos|youtube|tutorial|resources)\b/i.test(text);
+
+    if (!isMediaOnlyFollowUp) {
+      return text;
+    }
+  }
+
+  return '';
+}
+
+function cleanMediaQuery(rawQuery = '', type = 'image', maxLength = 96) {
+  let query = normalizeSearchText(rawQuery);
+
+  query = query
+    .replace(/\b(can you|could you|would you|please|pls|kindly)\b/gi, ' ')
+    .replace(/\b(tell me|show me|find me|get me|give me|bring me|i want|i need|want me to)\b/gi, ' ')
+    .replace(/\b(who is|what is|what are|explain|describe|analyze|analyse|identify|provide|create|make)\b/gi, ' ')
+    .replace(/\b(proper|relevant|best|good|some|only|latest)\b/gi, ' ');
+
+  if (type === 'image') {
+    query = query.replace(/\b(image|images|photo|photos|picture|pictures|visual|look like|looks like)\b/gi, ' ');
+  } else {
+    query = query.replace(/\b(youtube|video|videos|watch|resources?)\b/gi, ' ');
+  }
+
+  query = normalizeSearchText(query);
+
+  if (!query) {
+    return '';
+  }
+
+  if (type === 'youtube' && !/\b(explained|tutorial|lecture|guide|course)\b/i.test(query)) {
+    query = `${query} explained`;
+  }
+
+  return query.slice(0, maxLength).trim();
+}
+
+function buildMediaSearchPlan({ prompt, history, extra } = {}) {
+  const cleanPrompt = normalizeSearchText(prompt);
+  const lowerPrompt = cleanPrompt.toLowerCase();
+  const topicFromHistory = latestUserTopic(history);
+  const isFollowUp =
+    cleanPrompt.length < 36 ||
+    /^(more|continue|next|another|again|same|that|this|these|those)\b/i.test(cleanPrompt);
+
+  const baseTopic = isFollowUp && topicFromHistory
+    ? `${topicFromHistory} ${cleanPrompt}`
+    : cleanPrompt || topicFromHistory;
+
+  const explicitImageIntent = /\b(image|images|photo|photos|picture|pictures|look like|looks like|visual)\b/i.test(lowerPrompt);
+  const explicitVideoIntent = /\b(youtube|video|videos|tutorial|tutorials|lecture|lectures|course|courses|watch)\b/i.test(lowerPrompt);
+  const visualEntityIntent =
+    /\b(who is|what does|how does|look like|looks like)\b/i.test(lowerPrompt) ||
+    /\b(cat|dog|animal|person|actor|actress|character|logo|place|monument|map|diagram|graph|chart|flowchart)\b/i.test(lowerPrompt);
+  const abstractAnalysisIntent = /\b(analyze|analyse|transaction|network|financial pattern|layering|round tripping|benami|code|debug|error)\b/i.test(lowerPrompt);
+
+  const imageQuery = cleanMediaQuery(
+    [baseTopic, explicitImageIntent || visualEntityIntent ? '' : extra].filter(Boolean).join(' '),
+    'image'
+  );
+  const youtubeQuery = cleanMediaQuery(baseTopic, 'youtube');
+
+  return {
+    originalPrompt: cleanPrompt,
+    imageQuery,
+    youtubeQuery,
+    shouldFetchImages: Boolean(imageQuery && (explicitImageIntent || (visualEntityIntent && !abstractAnalysisIntent))),
+    shouldFetchVideos: Boolean(youtubeQuery && explicitVideoIntent),
+  };
+}
+
+function hostnameFromUrl(url = '') {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function scoreSearchResult(result, query, fields = {}) {
+  const tokens = searchTokens(query);
+  if (!tokens.length) {
+    return 0;
+  }
+
+  const title = String(fields.title ?? result?.title ?? '').toLowerCase();
+  const description = String(fields.description ?? result?.description ?? '').toLowerCase();
+  const url = String(fields.url ?? result?.pageUrl ?? result?.url ?? result?.imageUrl ?? '').toLowerCase();
+  const channel = String(fields.channel ?? result?.channelTitle ?? '').toLowerCase();
+  const combined = `${title} ${description} ${url} ${channel}`;
+  const compactQuery = normalizeSearchText(query).toLowerCase();
+
+  let score = compactQuery.length > 8 && combined.includes(compactQuery) ? 8 : 0;
+  for (const token of tokens) {
+    if (title.includes(token)) score += 4;
+    if (description.includes(token)) score += 2;
+    if (url.includes(token)) score += 1;
+    if (channel.includes(token)) score += 1;
+  }
+
+  return score;
+}
+
+function rerankImageResults(results = [], query, limit = 6) {
+  const seen = new Set();
+  return results
+    .map(result => {
+      const pageHost = hostnameFromUrl(result?.pageUrl);
+      const imageHost = hostnameFromUrl(result?.imageUrl);
+      const key = `${result?.imageUrl || ''}|${result?.pageUrl || ''}`;
+      let score = scoreSearchResult(result, query);
+      if (/instagram|pinterest|facebook|tiktok/.test(pageHost)) {
+        score -= 2;
+      }
+      return { result, score, key, host: pageHost || imageHost };
+    })
+    .filter(item => item.result?.imageUrl && item.score >= 2 && !seen.has(item.key) && seen.add(item.key))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(item => item.result);
+}
+
+function rerankVideoResults(results = [], query, limit = 5) {
+  const seen = new Set();
+  return results
+    .map(result => ({
+      result,
+      score: scoreSearchResult(result, query, {
+        title: result?.title,
+        description: result?.description,
+        channel: result?.channelTitle,
+        url: result?.url,
+      }),
+      key: result?.videoId || result?.url || result?.title,
+    }))
+    .filter(item => item.result && item.key && item.score >= 2 && !seen.has(item.key) && seen.add(item.key))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(item => item.result);
+}
+
+function logMediaDiagnostics(plan, payload = {}) {
+  if (process.env.NODE_ENV !== 'development') {
+    return;
+  }
+
+  console.log('[mediaSearch]', {
+    prompt: plan.originalPrompt,
+    imageQuery: plan.imageQuery,
+    youtubeQuery: plan.youtubeQuery,
+    shouldFetchImages: plan.shouldFetchImages,
+    shouldFetchVideos: plan.shouldFetchVideos,
+    imageTitles: payload.images?.map(item => item.title).filter(Boolean),
+    videoTitles: payload.videos?.map(item => item.title).filter(Boolean),
+  });
+}
+
+function geminiRetryDelayFromHeaders(headers, fallbackMs = 300000) {
+  const retryAfter = headers?.get?.('retry-after');
+  if (!retryAfter) {
+    return fallbackMs;
+  }
+
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.max(1000, seconds * 1000);
+  }
+
+  const retryDate = Date.parse(retryAfter);
+  if (Number.isFinite(retryDate)) {
+    return Math.max(1000, retryDate - Date.now());
+  }
+
+  return fallbackMs;
+}
+
+async function fetchGeminiStreamWithKeyRotation({ body, signal }) {
+  const maxAttempts = getGeminiMaxAttempts();
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const keyInfo = getNextGeminiApiKey();
+    if (!keyInfo) {
+      lastError = new Error('All Gemini API keys are currently cooling down');
+      break;
+    }
+
+    const url = `${BASE_URL}/${MODEL_ID}:streamGenerateContent?alt=sse&key=${keyInfo.key}`;
+    console.log(`[chatStream] Gemini stream attempt ${attempt}/${maxAttempts} using key index ${keyInfo.index}`);
+
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "text/event-stream"
+        },
+        body: JSON.stringify(body),
+        signal
+      });
+
+      if (response.ok && response.body) {
+        markGeminiApiKeyHealthy(keyInfo.index);
+        rotateGeminiApiKey();
+        return { upstream: response, attempts: attempt };
+      }
+
+      const text = await response.text().catch(() => response.statusText);
+      lastError = new Error(text || response.statusText || `Gemini HTTP ${response.status}`);
+
+      if (isRetryableGeminiError(response.status, text) && attempt < maxAttempts) {
+        const retryAfterMs = geminiRetryDelayFromHeaders(response.headers);
+        console.warn(`[chatStream] Gemini key index ${keyInfo.index} hit retryable status ${response.status}; trying next key`);
+        markGeminiApiKeyFailed(keyInfo.index, retryAfterMs);
+        await sleep(250 * attempt);
+        continue;
+      }
+
+      break;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[chatStream] Gemini stream attempt ${attempt} failed: ${message}`);
+
+      if ((message.includes('timeout') || message.includes('fetch') || message.includes('aborted')) && attempt < maxAttempts) {
+        markGeminiApiKeyFailed(keyInfo.index, 60000);
+        await sleep(250 * attempt);
+        continue;
+      }
+
+      break;
+    }
+  }
+
+  return { upstream: null, error: lastError, attempts: maxAttempts };
+}
+
 /**
  * Search YouTube videos using MCP
  * @param {string} query - Search query
  * @param {string} userId - User ID for rate limiting
  * @returns {Promise<Array>} - Array of video results
  */
-async function searchYouTubeVideos(query, userId) {
+async function searchYouTubeVideos(query, userId, options = {}) {
   if (!youtubeMCP) {
     console.log('[YouTube MCP] YouTube search disabled - no API key configured');
     return [];
@@ -268,7 +563,7 @@ async function searchYouTubeVideos(query, userId) {
     console.log('[YouTube MCP] Searching for:', query);
     const result = await youtubeMCP.search({
       query,
-      maxResults: 5,
+      maxResults: options.maxResults || 12,
       order: 'relevance',
       userId
     });
@@ -386,11 +681,15 @@ export async function handleChatGenerate(req, res) {
     });
 
     const processingTime = Date.now() - start;
-    const includeImageSearch = options.includeImageSearch !== false;
-    const contextualImageQuery = buildContextualSearchQuery({ prompt, history: messages });
-    const imageResults = includeImageSearch && contextualImageQuery
-      ? await searchImages(contextualImageQuery)
+    const mediaPlan = buildMediaSearchPlan({ prompt, history: messages });
+    const includeImageSearch =
+      options.includeImageSearch === true ||
+      (options.includeImageSearch !== false && mediaPlan.shouldFetchImages);
+    const rawImageResults = includeImageSearch && mediaPlan.imageQuery
+      ? await searchImages(mediaPlan.imageQuery, { num: 10 })
       : [];
+    const imageResults = rerankImageResults(rawImageResults, mediaPlan.imageQuery);
+    logMediaDiagnostics(mediaPlan, { images: imageResults });
 
     const aiContent = response?.content || response?.text || '';
     const aiSources = Array.isArray(response?.sources) ? response.sources : [];
@@ -574,32 +873,36 @@ export async function handleChatStreamGenerate(req, res) {
     // Default includeSearch to false when files exist unless explicitly overridden
     const files = Array.isArray(req.files) ? req.files : [];
     const includeSearch = typeof options.includeSearch === 'boolean' ? options.includeSearch : (files.length === 0);
-    const includeImageSearch = options.includeImageSearch !== false;
-    const includeYouTube = options.includeYouTube === true; // Opt-in for YouTube search
     const systemPrompt = options.systemPrompt || RESEARCH_ASSISTANT_PROMPT({ username });
     const uploadContext = uploadedText ? uploadedText.slice(0, 400) : '';
-    const contextualSearchQuery = buildContextualSearchQuery({ prompt, history: messages, extra: uploadContext });
+    const mediaPlan = buildMediaSearchPlan({ prompt, history: messages, extra: uploadContext });
+    const includeImageSearch =
+      options.includeImageSearch === true ||
+      (options.includeImageSearch !== false && mediaPlan.shouldFetchImages);
+    const includeYouTube = options.includeYouTube === true || mediaPlan.shouldFetchVideos;
 
     const body = buildRequestBody(chatHistory.slice(-10), systemPrompt, includeSearch);
-    const url = `${BASE_URL}/${MODEL_ID}:streamGenerateContent?alt=sse&key=${env.GEMINI_API_KEY}`;
 
     // Parallel search for images and YouTube videos
-    console.log('[chatStream] includeYouTube:', includeYouTube, 'contextualSearchQuery:', contextualSearchQuery);
-    const imageResultsPromise = includeImageSearch && contextualSearchQuery
-      ? searchImages(contextualSearchQuery)
+    console.log('[chatStream] includeYouTube:', includeYouTube, 'mediaPlan:', mediaPlan);
+    const imageResultsPromise = includeImageSearch && mediaPlan.imageQuery
+      ? searchImages(mediaPlan.imageQuery, { num: 10 })
       : Promise.resolve([]);
-    const youtubeResultsPromise = includeYouTube && contextualSearchQuery
-      ? searchYouTubeVideos(contextualSearchQuery, userId)
+    const youtubeResultsPromise = includeYouTube && mediaPlan.youtubeQuery
+      ? searchYouTubeVideos(mediaPlan.youtubeQuery, userId, { maxResults: 12 })
       : Promise.resolve(null);
 
-    const [imageResults, youtubeResultsPayload] = await Promise.all([imageResultsPromise, youtubeResultsPromise]);
+    const [rawImageResults, youtubeResultsPayload] = await Promise.all([imageResultsPromise, youtubeResultsPromise]);
+    const imageResults = rerankImageResults(rawImageResults, mediaPlan.imageQuery);
     console.log('[chatStream] youtubeResultsPayload:', youtubeResultsPayload);
-    const youtubeVideos = Array.isArray(youtubeResultsPayload)
+    const rawYoutubeVideos = Array.isArray(youtubeResultsPayload)
       ? youtubeResultsPayload
       : Array.isArray(youtubeResultsPayload?.results)
         ? youtubeResultsPayload.results
         : [];
+    const youtubeVideos = rerankVideoResults(rawYoutubeVideos, mediaPlan.youtubeQuery);
     console.log('[chatStream] youtubeVideos count:', youtubeVideos.length);
+    logMediaDiagnostics(mediaPlan, { images: imageResults, videos: youtubeVideos });
 
     // Prepare SSE response
     res.setHeader("Content-Type", "text/event-stream");
@@ -621,19 +924,13 @@ export async function handleChatStreamGenerate(req, res) {
       res.write(`data: ${JSON.stringify({ videos: youtubeVideos })}\n\n`);
     }
 
-    const upstream = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream"
-      },
-      body: JSON.stringify(body)
-    });
+    const streamResult = await fetchGeminiStreamWithKeyRotation({ body });
+    const upstream = streamResult.upstream;
 
-    if (!upstream.ok || !upstream.body) {
-      const txt = await upstream.text().catch(() => "");
+    if (!upstream?.body) {
+      const errorMessage = streamResult.error?.message || "Gemini stream unavailable";
       res.write(`event: error\n`);
-      res.write(`data: ${JSON.stringify({ status: upstream.status, error: txt || upstream.statusText })}\n\n`);
+      res.write(`data: ${JSON.stringify({ error: errorMessage, attempts: streamResult.attempts })}\n\n`);
       return res.end();
     }
 

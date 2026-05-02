@@ -21,10 +21,28 @@ const EXPERT_PROMPTS = {
   'default': RESEARCH_ASSISTANT_PROMPT,
 };
 
-const GEMINI_API_KEYS = [
-  env.GEMINI_API_KEY,
-  env.GEMINI_API_KEY2
-].filter(Boolean);
+function collectGeminiApiKeys() {
+  const candidates = [
+    env.GEMINI_API_KEYS,
+    env.GEMINI_API_KEY,
+    env.GEMINI_API_KEY2,
+    env.GEMINI_API_KEY3,
+    env.GEMINI_API_KEY4,
+    env.GEMINI_API_KEY_1,
+    env.GEMINI_API_KEY_2,
+    env.GEMINI_API_KEY_3,
+    env.GEMINI_API_KEY_4,
+  ];
+
+  const keys = candidates
+    .flatMap((value) => String(value || '').split(','))
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  return Array.from(new Set(keys));
+}
+
+const GEMINI_API_KEYS = collectGeminiApiKeys();
 
 export const MODEL_ID = "gemini-2.5-flash-lite";
 export const GENERATE_CONTENT_API = "generateContent";
@@ -122,6 +140,11 @@ class APIKeyManager {
     this.keyRetryTime.set(keyIndex, Date.now() + retryAfter);
   }
 
+  markKeyHealthy(keyIndex) {
+    this.failedKeys.delete(keyIndex);
+    this.keyRetryTime.delete(keyIndex);
+  }
+
   getNextAvailableKey() {
     const now = Date.now();
 
@@ -146,6 +169,7 @@ class APIKeyManager {
   }
 
   rotateKey() {
+    if (this.keys.length === 0) return;
     this.currentIndex = (this.currentIndex + 1) % this.keys.length;
   }
 }
@@ -560,6 +584,39 @@ async function fetchWithTimeout(url, options, timeout = CONFIG.REQUEST_TIMEOUT) 
 const chatHistory = new ChatHistoryManager();
 const keyManager = new APIKeyManager(GEMINI_API_KEYS);
 
+export function isRetryableGeminiError(status, message = '') {
+  const normalizedMessage = String(message || '').toLowerCase();
+  return (
+    status === 429 ||
+    RETRYABLE_STATUS_CODES.has(status) ||
+    normalizedMessage.includes('quota') ||
+    normalizedMessage.includes('exhausted') ||
+    normalizedMessage.includes('resource has been exhausted') ||
+    normalizedMessage.includes('rate limit')
+  );
+}
+
+export function getGeminiMaxAttempts() {
+  return Math.max(1, Math.min(GEMINI_API_KEYS.length * 2, 8));
+}
+
+export function getNextGeminiApiKey() {
+  return keyManager.getNextAvailableKey();
+}
+
+export function markGeminiApiKeyFailed(keyIndex, retryAfter = 300000) {
+  keyManager.markKeyFailed(keyIndex, retryAfter);
+  keyManager.rotateKey();
+}
+
+export function markGeminiApiKeyHealthy(keyIndex) {
+  keyManager.markKeyHealthy(keyIndex);
+}
+
+export function rotateGeminiApiKey() {
+  keyManager.rotateKey();
+}
+
 async function parsePdfBuffer(buf) {
   try {
     const mod = await import('pdf-parse');
@@ -780,7 +837,7 @@ export async function generateContent(
     const requestBody = buildRequestBody(messages, selectedSystemPrompt, options.includeSearch !== false);
     let lastError = null;
     let attemptsCount = 0;
-    const maxAttempts = Math.min(GEMINI_API_KEYS.length * 2, 5); // Limit total attempts
+    const maxAttempts = getGeminiMaxAttempts();
 
     // Retry logic with exponential backoff
     while (attemptsCount < maxAttempts) {
@@ -823,11 +880,7 @@ export async function generateContent(
 
           // Handle retryable errors or specific quota/resource exhausted messages
           // Gemini sometimes matches these patterns even if status isn't strictly 429
-          const isQuotaError =
-            response.status === 429 ||
-            errorMessage.toLowerCase().includes('quota') ||
-            errorMessage.toLowerCase().includes('exhausted') ||
-            errorMessage.toLowerCase().includes('resource has been exhausted');
+          const isQuotaError = isRetryableGeminiError(response.status, errorMessage);
 
           if (isQuotaError || RETRYABLE_STATUS_CODES.has(response.status)) {
             console.warn(`Retryable error (${response.status} - ${errorMessage}), trying next key...`);
@@ -847,6 +900,8 @@ export async function generateContent(
 
         // Process successful response
         const result = await processGeminiResponse(data);
+        keyManager.markKeyHealthy(keyInfo.index);
+        keyManager.rotateKey();
 
         // Check if we got empty content and handle it
         if (!result.content || result.content.trim().length === 0) {
