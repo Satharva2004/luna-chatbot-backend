@@ -881,10 +881,34 @@ export async function handleChatStreamGenerate(req, res) {
       (options.includeImageSearch !== false && mediaPlan.shouldFetchImages);
     const includeYouTube = options.includeYouTube === true || mediaPlan.shouldFetchVideos;
 
+    // Prepare SSE response
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+
+    const emitStatus = (id, label, state = 'running', detail) => {
+      if (res.writableEnded) return;
+      res.write(`event: status\n`);
+      res.write(`data: ${JSON.stringify({ id, label, state, detail })}\n\n`);
+    };
+
+    // Send conversation ID immediately
+    res.write(`event: conversationId\n`);
+    res.write(`data: ${JSON.stringify({ conversationId: currentConversationId })}\n\n`);
+
     const body = buildRequestBody(chatHistory.slice(-10), systemPrompt, includeSearch);
+    emitStatus('request-context', files.length > 0 ? 'Reading uploaded files' : 'Preparing context', 'complete');
 
     // Parallel search for images and YouTube videos
     console.log('[chatStream] includeYouTube:', includeYouTube, 'mediaPlan:', mediaPlan);
+    if (includeImageSearch && mediaPlan.imageQuery) {
+      emitStatus('image-search', 'Searching images', 'running', mediaPlan.imageQuery);
+    }
+    if (includeYouTube && mediaPlan.youtubeQuery) {
+      emitStatus('youtube-search', 'Searching videos', 'running', mediaPlan.youtubeQuery);
+    }
+
     const imageResultsPromise = includeImageSearch && mediaPlan.imageQuery
       ? searchImages(mediaPlan.imageQuery, { num: 10 })
       : Promise.resolve([]);
@@ -904,15 +928,22 @@ export async function handleChatStreamGenerate(req, res) {
     console.log('[chatStream] youtubeVideos count:', youtubeVideos.length);
     logMediaDiagnostics(mediaPlan, { images: imageResults, videos: youtubeVideos });
 
-    // Prepare SSE response
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders?.();
-
-    // Send conversation ID immediately
-    res.write(`event: conversationId\n`);
-    res.write(`data: ${JSON.stringify({ conversationId: currentConversationId })}\n\n`);
+    if (includeImageSearch && mediaPlan.imageQuery) {
+      emitStatus(
+        'image-search',
+        imageResults.length > 0 ? 'Found image references' : 'No image references found',
+        'complete',
+        imageResults.length > 0 ? `${imageResults.length} result${imageResults.length === 1 ? '' : 's'}` : undefined
+      );
+    }
+    if (includeYouTube && mediaPlan.youtubeQuery) {
+      emitStatus(
+        'youtube-search',
+        youtubeVideos.length > 0 ? 'Found video references' : 'No video references found',
+        'complete',
+        youtubeVideos.length > 0 ? `${youtubeVideos.length} result${youtubeVideos.length === 1 ? '' : 's'}` : undefined
+      );
+    }
 
     if (imageResults.length > 0) {
       res.write(`event: images\n`);
@@ -924,11 +955,13 @@ export async function handleChatStreamGenerate(req, res) {
       res.write(`data: ${JSON.stringify({ videos: youtubeVideos })}\n\n`);
     }
 
+    emitStatus('model-generation', 'Generating answer', 'running');
     const streamResult = await fetchGeminiStreamWithKeyRotation({ body });
     const upstream = streamResult.upstream;
 
     if (!upstream?.body) {
       const errorMessage = streamResult.error?.message || "Gemini stream unavailable";
+      emitStatus('model-generation', 'Generation failed', 'error', errorMessage);
       res.write(`event: error\n`);
       res.write(`data: ${JSON.stringify({ error: errorMessage, attempts: streamResult.attempts })}\n\n`);
       return res.end();
@@ -987,6 +1020,7 @@ export async function handleChatStreamGenerate(req, res) {
               if (p.functionCall.name === 'generate_excalidraw_flowchart') {
                 try {
                   console.log('[chatStream] Executing Excalidraw generation');
+                  emitStatus('flowchart-generation', 'Creating flowchart', 'running');
                   const { generateExcalidrawFlowchart } = await import('../helpers/groq.js');
                   const flowchartData = await generateExcalidrawFlowchart(
                     p.functionCall.args.prompt,
@@ -1009,9 +1043,11 @@ export async function handleChatStreamGenerate(req, res) {
                   res.write(`event: message\n`);
                   res.write(`data: ${JSON.stringify({ text: message })}\n\n`);
 
+                  emitStatus('flowchart-generation', 'Flowchart ready', 'complete');
                   console.log('[chatStream] Excalidraw flowchart generated and emitted');
                 } catch (error) {
                   console.error('[chatStream] Error generating Excalidraw:', error);
+                  emitStatus('flowchart-generation', 'Flowchart failed', 'error', error.message);
                   const errorMsg = `\n\n[Note: Failed to generate flowchart: ${error.message}]`;
                   streamedContent += errorMsg;
                   res.write(`event: message\n`);
@@ -1092,6 +1128,7 @@ export async function handleChatStreamGenerate(req, res) {
       try {
         let mermaidProcessingResult = { content: streamedContent, blocks: [] };
         try {
+          emitStatus('diagram-check', 'Checking diagrams', 'running');
           mermaidProcessingResult = await processMermaidBlocks({
             content: streamedContent,
             prompt,
@@ -1102,12 +1139,19 @@ export async function handleChatStreamGenerate(req, res) {
             res.write(`event: mermaid\n`);
             res.write(`data: ${JSON.stringify({ blocks: mermaidProcessingResult.blocks })}\n\n`);
           }
+          emitStatus(
+            'diagram-check',
+            mermaidProcessingResult.blocks.length > 0 ? 'Diagrams updated' : 'No diagrams to update',
+            'complete'
+          );
         } catch (mermaidError) {
           console.warn('Mermaid processing failed:', mermaidError?.message || mermaidError);
+          emitStatus('diagram-check', 'Diagram check failed', 'error', mermaidError?.message || 'Unable to check diagrams');
         }
 
         if (streamedSources.size > 0) {
           console.log(`[chatStream] emitting sources from streamed grounding: count=${streamedSources.size}`);
+          emitStatus('source-fetch', 'Resolving web sources', 'running', `${streamedSources.size} source${streamedSources.size === 1 ? '' : 's'}`);
           // Resolve titles for sources concurrently (limit simple)
           const urls = Array.from(streamedSources);
           const titlePromises = urls.map(async (u) => ({ url: u, title: await fetchPageTitle(u) }));
@@ -1121,8 +1165,10 @@ export async function handleChatStreamGenerate(req, res) {
           console.log('[chatStream] sourcesWithTitles:', finalSourcesWithTitles);
           res.write(`event: sources\n`);
           res.write(`data: ${JSON.stringify({ sources: finalSourcesWithTitles })}\n\n`);
+          emitStatus('source-fetch', 'Sources ready', 'complete', `${finalSourcesWithTitles.length} source${finalSourcesWithTitles.length === 1 ? '' : 's'}`);
         } else {
           console.log('[chatStream] no streamed grounding sources found; attempting fallback generateContent for sources');
+          emitStatus('source-fetch', 'Checking web sources', 'running');
           // Fallback: perform a quick non-stream call to obtain sources
           try {
             const gen = await generateContent(prompt, userId, {
@@ -1138,6 +1184,7 @@ export async function handleChatStreamGenerate(req, res) {
                 res.write(`event: sources\n`);
                 res.write(`data: ${JSON.stringify({ sources: finalSourcesWithTitles })}\n\n`);
               }
+              emitStatus('source-fetch', 'Sources ready', 'complete', `${finalSourcesWithTitles.length} source${finalSourcesWithTitles.length === 1 ? '' : 's'}`);
             } else {
               console.log('[chatStream] fallback produced no sources');
               if (!res.writableEnded) {
@@ -1145,6 +1192,7 @@ export async function handleChatStreamGenerate(req, res) {
                 res.write(`event: sources\n`);
                 res.write(`data: {"sources": []}\n\n`);
               }
+              emitStatus('source-fetch', 'No web sources found', 'complete');
             }
           } catch (e) {
             console.warn('Fallback source fetch failed:', e?.message || e);
@@ -1153,6 +1201,7 @@ export async function handleChatStreamGenerate(req, res) {
               res.write(`event: sources\n`);
               res.write(`data: {"sources": []}\n\n`);
             }
+            emitStatus('source-fetch', 'Source check failed', 'error', e?.message || 'Unable to resolve sources');
           }
         }
       } catch (e) {
@@ -1208,12 +1257,14 @@ export async function handleChatStreamGenerate(req, res) {
       }
 
       await sleep(STREAM_CLOSE_DELAY_MS);
+      emitStatus('model-generation', 'Answer complete', 'complete');
       res.end();
     });
 
     upstream.body.on("error", (err) => {
       console.error('Gemini stream error:', err);
       try {
+        emitStatus('model-generation', 'Generation failed', 'error', err?.message || 'stream error');
         res.write(`event: error\n`);
         res.write(`data: ${JSON.stringify({ message: err?.message || "stream error" })}\n\n`);
       } finally {
