@@ -53,10 +53,11 @@ const CONFIG = {
   MAX_HISTORY_LENGTH: 10,
   MAX_OUTPUT_TOKENS: 65536,
   MAX_USERS: 100,
-  RETRY_DELAY: 1000, //1ms
+  RETRY_DELAY: 1000, // 1 second
   REQUEST_TIMEOUT: 60000,
-  TITLE_FETCH_TIMEOUT: 5000, // 5 seconds for title fetching
-  MAX_TITLE_LENGTH: 100, // Maximum title length
+  TITLE_FETCH_TIMEOUT: 5000,
+  MAX_TITLE_LENGTH: 100,
+  MAX_TITLE_CACHE_SIZE: 500,
 };
 
 // Excalidraw flowchart generation function declaration for Gemini
@@ -88,37 +89,41 @@ const EXCALIDRAW_FUNCTION_DECLARATION = {
 // Retryable HTTP status codes
 const RETRYABLE_STATUS_CODES = new Set([429, 502, 503, 504]);
 
-// Cache for page titles to avoid repeated requests
+// Bounded LRU cache for page titles to avoid repeated requests and memory leaks
 const titleCache = new Map();
 
 class ChatHistoryManager {
   constructor(maxUsers = CONFIG.MAX_USERS) {
+    // Uses Map insertion-order for O(1) LRU eviction
     this.history = new Map();
     this.maxUsers = maxUsers;
-    this.accessOrder = new Map(); // Track access time for LRU
   }
 
   get(userId) {
-    this.accessOrder.set(userId, Date.now());
-    return this.history.get(userId) || [];
+    const entry = this.history.get(userId);
+    if (entry !== undefined) {
+      // Move to end (most recently used) by re-inserting
+      this.history.delete(userId);
+      this.history.set(userId, entry);
+    }
+    return entry || [];
   }
 
   set(userId, messages) {
-    // Implement LRU eviction if we exceed max users
-    if (this.history.size >= this.maxUsers && !this.history.has(userId)) {
-      const oldestUser = [...this.accessOrder.entries()]
-        .sort((a, b) => a[1] - b[1])[0][0];
-      this.history.delete(oldestUser);
-      this.accessOrder.delete(oldestUser);
+    // Delete first so re-insert moves it to end
+    this.history.delete(userId);
+
+    // Evict oldest (first key in Map) if at capacity
+    if (this.history.size >= this.maxUsers) {
+      const oldestKey = this.history.keys().next().value;
+      this.history.delete(oldestKey);
     }
 
     this.history.set(userId, messages);
-    this.accessOrder.set(userId, Date.now());
   }
 
   clear(userId) {
     this.history.delete(userId);
-    this.accessOrder.delete(userId);
   }
 }
 
@@ -232,7 +237,11 @@ async function fetchPageTitle(url) {
       }
     }
 
-    // Cache the result
+    // Cache the result (bounded to prevent memory leaks)
+    if (titleCache.size >= CONFIG.MAX_TITLE_CACHE_SIZE) {
+      const oldestKey = titleCache.keys().next().value;
+      titleCache.delete(oldestKey);
+    }
     titleCache.set(url, title);
 
     return title;
@@ -317,14 +326,12 @@ async function processGeminiResponse(response) {
   try {
     // Handle streaming response (array of chunks) vs single response
     const responseChunks = Array.isArray(response) ? response : [response];
-    console.log(`Processing ${responseChunks.length} response chunks`);
 
     let hasValidContent = false;
     let lastFinishReason = null;
 
     for (let i = 0; i < responseChunks.length; i++) {
       const chunk = responseChunks[i];
-      console.log(`Processing chunk ${i + 1}:`, JSON.stringify(chunk, null, 2));
 
       const candidates = chunk.candidates;
       if (!candidates?.length) {
@@ -346,7 +353,6 @@ async function processGeminiResponse(response) {
       // Track finish reason from last chunk
       if (candidate.finishReason) {
         lastFinishReason = candidate.finishReason;
-        console.log(`Chunk ${i + 1} finish reason:`, candidate.finishReason);
       }
 
       // Extract content from this chunk
@@ -358,13 +364,12 @@ async function processGeminiResponse(response) {
           const chunkContent = textParts.map(part => part.text).join('');
           result.content += chunkContent;
           hasValidContent = true;
-          console.log(`Chunk ${i + 1} added ${chunkContent.length} characters`);
         }
 
         // Capture function calls (e.g., Excalidraw flowchart generation)
         for (const part of parts) {
           if (part.functionCall) {
-            console.log('Function call detected:', part.functionCall);
+            console.log('Function call detected:', part.functionCall.name);
             result.functionCalls.push({
               name: part.functionCall.name,
               args: part.functionCall.args
@@ -428,12 +433,10 @@ async function processGeminiResponse(response) {
       }
 
       // Light cleanup while preserving markdown links so users can click them
-      const originalLength = result.content.length;
       result.content = result.content
         .replace(/\*\*\*.*?\*\*\*/g, '') // Remove triple-asterisk bold artifacts if any
         .replace(/\n{3,}/g, '\n\n')       // Remove excessive newlines
         .trim();
-      console.log(`Content cleaned (links preserved): ${originalLength} -> ${result.content.length} chars`);
     }
 
     // Process sources with titles
@@ -461,14 +464,7 @@ async function processGeminiResponse(response) {
       }
     }
 
-    console.log('Final processing result:', {
-      contentLength: result.content?.length || 0,
-      sourcesCount: processedSources.length,
-      hasValidContent,
-      lastFinishReason,
-      functionCallsCount: result.functionCalls.length,
-      excalidrawCount: excalidrawData.length
-    });
+    console.log(`Processed: ${result.content?.length || 0} chars, ${processedSources.length} sources, ${excalidrawData.length} diagrams`);
 
     return {
       content: result.content,
@@ -496,12 +492,10 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
     contents: messages,
 
     generationConfig: {
-      temperature: 0.1,  // Increased from 0 to make function calling more likely
+      temperature: 0.1,
       topP: 0.95,
       topK: 40,
       maxOutputTokens: CONFIG.MAX_OUTPUT_TOKENS,
-      candidateCount: 1,
-      stopSequences: []
     },
     safetySettings: [
       {
@@ -524,25 +518,11 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
   };
 
   // Add system instruction if provided
+  // Note: systemInstruction does not take a 'role' field in the Gemini API
   if (systemPrompt) {
-    // Ensure system instruction is given highest priority
     body.systemInstruction = {
-      role: 'system',
-      parts: [{
-        text: systemPrompt + "\n\nRemember: Follow all instructions exactly as given, including response formatting requirements."
-      }]
+      parts: [{ text: systemPrompt }]
     };
-
-    // Also add as the first message to reinforce the instruction
-    if (body.contents && body.contents.length > 0) {
-      body.contents = [
-        {
-          role: 'user',
-          parts: [{ text: 'IMPORTANT: Follow all instructions in the system prompt exactly, including any required response formatting.' }]
-        },
-        ...body.contents
-      ];
-    }
   }
 
   body.tools = [];
@@ -553,16 +533,13 @@ export function buildRequestBody(messages, systemPrompt = null, includeSearch = 
     body.tools.push({
       google_search: {}
     });
-    console.log(`[buildRequestBody] Enabling google_search (prioritized over function calling)`);
   } else {
     // Only add Excalidraw if search is NOT enabled to avoid incompatibility errors
     body.tools.push({
       function_declarations: [EXCALIDRAW_FUNCTION_DECLARATION]
     });
-    console.log(`[buildRequestBody] Enabling function_declarations (Excalidraw)`);
   }
 
-  console.log(`Built request body (search: ${includeSearch}, model: ${MODEL_ID}):`, JSON.stringify(body, null, 2));
   return body;
 }
 
@@ -587,7 +564,6 @@ const keyManager = new APIKeyManager(GEMINI_API_KEYS);
 export function isRetryableGeminiError(status, message = '') {
   const normalizedMessage = String(message || '').toLowerCase();
   return (
-    status === 429 ||
     RETRYABLE_STATUS_CODES.has(status) ||
     normalizedMessage.includes('quota') ||
     normalizedMessage.includes('exhausted') ||
@@ -633,7 +609,7 @@ async function parseDocxBuffer(buf) {
   try {
     const mod = await import('mammoth');
     const mammoth = mod?.default || mod;
-    const result = await mammoth.extractRawText({ buffer: Buffer.from(buf) });
+    const result = await mammoth.extractRawText({ buffer: buf });
     return result?.value || '';
   } catch (e) {
     console.warn('mammoth not available or failed to parse DOCX:', e?.message || e);
@@ -663,6 +639,32 @@ async function parseSpreadsheetBuffer(buf) {
   }
 }
 
+// MIME types that can be read as plain UTF-8 text
+const PLAINTEXT_MIMES = new Set([
+  'application/json',
+  'application/rtf',
+]);
+
+/**
+ * Resolve a parser for the given MIME type / filename.
+ * Returns one of: 'pdf', 'docx', 'spreadsheet', 'text', or null.
+ */
+function resolveFileParser(mime, filename) {
+  if (mime === 'application/pdf') return 'pdf';
+  if (mime.startsWith('text/')) return 'text'; // covers text/plain, text/csv, text/html, text/markdown
+  if (PLAINTEXT_MIMES.has(mime)) return 'text';
+  if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') return 'docx';
+  if (mime === 'application/vnd.ms-excel' || mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') return 'spreadsheet';
+
+  // Fallback: try to infer from extension
+  const lower = (filename || '').toLowerCase();
+  if (lower.endsWith('.pdf')) return 'pdf';
+  if (lower.endsWith('.docx')) return 'docx';
+  if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) return 'spreadsheet';
+
+  return null;
+}
+
 export async function extractTextFromUploads(files = []) {
   if (!Array.isArray(files) || files.length === 0) return '';
   const parts = [];
@@ -675,42 +677,14 @@ export async function extractTextFromUploads(files = []) {
       const buf = f.buffer;
       if (!buf || !Buffer.isBuffer(buf)) continue;
 
+      const parser = resolveFileParser(mime, name);
       let text = '';
-      if (mime === 'application/pdf') {
-        text = await parsePdfBuffer(buf);
-      } else if (mime.startsWith('text/')) {
-        text = Buffer.from(buf).toString('utf8');
-      } else if (mime === 'text/markdown') {
-        text = Buffer.from(buf).toString('utf8');
-      } else if (mime === 'text/html') {
-        text = Buffer.from(buf).toString('utf8');
-      } else if (mime === 'application/json') {
-        text = Buffer.from(buf).toString('utf8');
-      } else if (mime === 'application/rtf') {
-        text = Buffer.from(buf).toString('utf8');
-      } else if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') { // .docx
-        text = await parseDocxBuffer(buf);
-      } else if (mime === 'application/msword') { // .doc legacy
-        console.warn('Legacy .doc files are not supported for text extraction. Consider converting to .docx');
-        text = '';
-      } else if (mime === 'text/csv') {
-        text = Buffer.from(buf).toString('utf8');
-      } else if (mime === 'application/vnd.ms-excel' || mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') { // .xls/.xlsx
-        text = await parseSpreadsheetBuffer(buf);
-      } else if (mime === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' || mime === 'application/vnd.ms-powerpoint') { // .pptx/.ppt
-        console.warn('PowerPoint files are accepted but text extraction is not implemented.');
-        text = '';
-      } else {
-        const lower = (name || '').toLowerCase();
-        if (!text && lower.endsWith('.pdf')) {
-          text = await parsePdfBuffer(buf);
-        } else if (lower.endsWith('.docx')) {
-          text = await parseDocxBuffer(buf);
-        } else if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) {
-          text = await parseSpreadsheetBuffer(buf);
-        } else {
-          text = '';
-        }
+      switch (parser) {
+        case 'pdf':         text = await parsePdfBuffer(buf); break;
+        case 'docx':        text = await parseDocxBuffer(buf); break;
+        case 'spreadsheet': text = await parseSpreadsheetBuffer(buf); break;
+        case 'text':        text = buf.toString('utf8'); break;
+        default:            text = ''; break;
       }
 
       if (text) {
@@ -741,7 +715,7 @@ export async function extractImagesFromUploads(files = []) {
       const name = f.originalname || 'image';
       const buf = f.buffer;
       if (!buf || !Buffer.isBuffer(buf)) continue;
-      const data = Buffer.from(buf).toString('base64');
+      const data = buf.toString('base64');
       images.push({ name, mimeType: mime, data });
     } catch (_) {
       /* ignore single file errors */
@@ -766,9 +740,6 @@ export async function generateContent(
   userId = 'default',
   options = {}
 ) {
-  console.log('generateContent called with:', { prompt, userId, options });
-
-
   const startTime = Date.now();
 
   try {
@@ -790,22 +761,14 @@ export async function generateContent(
       }
     }
 
-    // System prompt is used as-is without Mermaid rules
-    // Flowcharts are now generated via function calling
-
     // Get user history and prepare messages
     const userHistory = chatHistory.get(userId);
 
-    // Incorporate uploaded text and images if provided
-    const uploadedText = await extractTextFromUploads(options.uploads);
-    const uploadedImages = await extractImagesFromUploads(options.uploads);
-    if (options.uploads && options.uploads.length) {
-      console.log('Uploads provided to generateContent:', {
-        total: options.uploads.length,
-        textChars: uploadedText ? uploadedText.length : 0,
-        imagesCount: uploadedImages.length
-      });
-    }
+    // Extract text and images concurrently
+    const [uploadedText, uploadedImages] = await Promise.all([
+      extractTextFromUploads(options.uploads),
+      extractImagesFromUploads(options.uploads),
+    ]);
 
     let composedPrompt = prompt || '';
     if (uploadedText) {
@@ -818,9 +781,6 @@ export async function generateContent(
       if (img && img.data && img.mimeType) {
         parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
       }
-    }
-    if (uploadedImages.length) {
-      console.log(`Attached ${uploadedImages.length} image(s) to the user message as inlineData.`);
     }
 
     const userMessage = {
@@ -849,7 +809,7 @@ export async function generateContent(
       }
 
       attemptsCount++;
-      console.log(`Attempt ${attemptsCount}/${maxAttempts} using API key index: ${keyInfo.index}`);
+      console.log(`Attempt ${attemptsCount}/${maxAttempts} using key #${keyInfo.index}`);
 
       try {
         const url = `${BASE_URL}/${MODEL_ID}:${GENERATE_CONTENT_API}?key=${keyInfo.key}`;
@@ -863,29 +823,24 @@ export async function generateContent(
           body: JSON.stringify(requestBody)
         });
 
-        // Log response details for debugging
-        console.log('Response status:', response.status);
-        console.log('Response headers:', Object.fromEntries(response.headers.entries()));
-
         const data = await response.json().catch(err => {
-          console.error('Failed to parse response as JSON:', err);
+          console.error('Failed to parse response as JSON:', err.message);
           return { error: { message: 'Invalid JSON response' } };
         });
-
-        console.log('Raw response data:', JSON.stringify(data, null, 2));
 
         if (!response.ok) {
           const errorMessage = data?.error?.message || `HTTP ${response.status}: ${response.statusText}`;
           const error = new Error(errorMessage);
 
           // Handle retryable errors or specific quota/resource exhausted messages
-          // Gemini sometimes matches these patterns even if status isn't strictly 429
-          const isQuotaError = isRetryableGeminiError(response.status, errorMessage);
+          const isRetryable = isRetryableGeminiError(response.status, errorMessage);
 
-          if (isQuotaError || RETRYABLE_STATUS_CODES.has(response.status)) {
+          if (isRetryable) {
             console.warn(`Retryable error (${response.status} - ${errorMessage}), trying next key...`);
 
-            // Mark key as failed for a simpler 1 minute if it's just a flake, or 5 mins if quota
+            // Mark key as failed: 5 mins for quota errors, 1 min for transient flakes
+            const isQuotaError = errorMessage.toLowerCase().includes('quota') ||
+                                 errorMessage.toLowerCase().includes('exhausted');
             keyManager.markKeyFailed(keyInfo.index, isQuotaError ? 300000 : 60000);
             keyManager.rotateKey();
 
@@ -946,7 +901,7 @@ export async function generateContent(
         result.processingTime = Date.now() - startTime;
         result.attempts = attemptsCount;
 
-        console.log(`Request completed successfully in ${result.processingTime}ms`);
+        console.log(`Gemini request OK in ${result.processingTime}ms (${attemptsCount} attempt(s))`);
         return result;
 
       } catch (error) {
