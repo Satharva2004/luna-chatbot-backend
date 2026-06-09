@@ -237,7 +237,7 @@ async function fetchPageTitle(url) {
       }
     }
 
-    // Cache the result (bounded to prevent memory leaks)
+    // Cache the result (bounded)
     if (titleCache.size >= CONFIG.MAX_TITLE_CACHE_SIZE) {
       const oldestKey = titleCache.keys().next().value;
       titleCache.delete(oldestKey);
@@ -353,6 +353,7 @@ async function processGeminiResponse(response) {
       // Track finish reason from last chunk
       if (candidate.finishReason) {
         lastFinishReason = candidate.finishReason;
+        console.log(`Chunk ${i + 1} finish reason:`, candidate.finishReason);
       }
 
       // Extract content from this chunk
@@ -364,12 +365,13 @@ async function processGeminiResponse(response) {
           const chunkContent = textParts.map(part => part.text).join('');
           result.content += chunkContent;
           hasValidContent = true;
+          console.log(`Chunk ${i + 1} added ${chunkContent.length} characters`);
         }
 
         // Capture function calls (e.g., Excalidraw flowchart generation)
         for (const part of parts) {
           if (part.functionCall) {
-            console.log('Function call detected:', part.functionCall.name);
+            console.log('Function call detected:', part.functionCall);
             result.functionCalls.push({
               name: part.functionCall.name,
               args: part.functionCall.args
@@ -486,7 +488,6 @@ async function processGeminiResponse(response) {
     };
   }
 }
-
 export function buildRequestBody(messages, systemPrompt = null, includeSearch = true) {
   const body = {
     contents: messages,
@@ -564,6 +565,7 @@ const keyManager = new APIKeyManager(GEMINI_API_KEYS);
 export function isRetryableGeminiError(status, message = '') {
   const normalizedMessage = String(message || '').toLowerCase();
   return (
+    status === 429 ||
     RETRYABLE_STATUS_CODES.has(status) ||
     normalizedMessage.includes('quota') ||
     normalizedMessage.includes('exhausted') ||
@@ -609,7 +611,7 @@ async function parseDocxBuffer(buf) {
   try {
     const mod = await import('mammoth');
     const mammoth = mod?.default || mod;
-    const result = await mammoth.extractRawText({ buffer: buf });
+    const result = await mammoth.extractRawText({ buffer: Buffer.from(buf) });
     return result?.value || '';
   } catch (e) {
     console.warn('mammoth not available or failed to parse DOCX:', e?.message || e);
@@ -680,11 +682,11 @@ export async function extractTextFromUploads(files = []) {
       const parser = resolveFileParser(mime, name);
       let text = '';
       switch (parser) {
-        case 'pdf':         text = await parsePdfBuffer(buf); break;
-        case 'docx':        text = await parseDocxBuffer(buf); break;
+        case 'pdf': text = await parsePdfBuffer(buf); break;
+        case 'docx': text = await parseDocxBuffer(buf); break;
         case 'spreadsheet': text = await parseSpreadsheetBuffer(buf); break;
-        case 'text':        text = buf.toString('utf8'); break;
-        default:            text = ''; break;
+        case 'text': text = buf.toString('utf8'); break;
+        default: text = ''; break;
       }
 
       if (text) {
@@ -740,6 +742,7 @@ export async function generateContent(
   userId = 'default',
   options = {}
 ) {
+
   const startTime = Date.now();
 
   try {
@@ -761,9 +764,13 @@ export async function generateContent(
       }
     }
 
+    // System prompt is used as-is without Mermaid rules
+    // Flowcharts are now generated via function calling
+
     // Get user history and prepare messages
     const userHistory = chatHistory.get(userId);
 
+    // Incorporate uploaded text and images if provided
     // Extract text and images concurrently
     const [uploadedText, uploadedImages] = await Promise.all([
       extractTextFromUploads(options.uploads),
@@ -782,6 +789,7 @@ export async function generateContent(
         parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
       }
     }
+
 
     const userMessage = {
       role: 'user',
@@ -833,14 +841,13 @@ export async function generateContent(
           const error = new Error(errorMessage);
 
           // Handle retryable errors or specific quota/resource exhausted messages
-          const isRetryable = isRetryableGeminiError(response.status, errorMessage);
+          // Gemini sometimes matches these patterns even if status isn't strictly 429
+          const isQuotaError = isRetryableGeminiError(response.status, errorMessage);
 
-          if (isRetryable) {
+          if (isQuotaError || RETRYABLE_STATUS_CODES.has(response.status)) {
             console.warn(`Retryable error (${response.status} - ${errorMessage}), trying next key...`);
 
-            // Mark key as failed: 5 mins for quota errors, 1 min for transient flakes
-            const isQuotaError = errorMessage.toLowerCase().includes('quota') ||
-                                 errorMessage.toLowerCase().includes('exhausted');
+            // Mark key as failed for a simpler 1 minute if it's just a flake, or 5 mins if quota
             keyManager.markKeyFailed(keyInfo.index, isQuotaError ? 300000 : 60000);
             keyManager.rotateKey();
 
