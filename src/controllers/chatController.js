@@ -1167,42 +1167,12 @@ export async function handleChatStreamGenerate(req, res) {
           res.write(`data: ${JSON.stringify({ sources: finalSourcesWithTitles })}\n\n`);
           emitStatus('source-fetch', 'Sources ready', 'complete', `${finalSourcesWithTitles.length} source${finalSourcesWithTitles.length === 1 ? '' : 's'}`);
         } else {
-          console.log('[chatStream] no streamed grounding sources found; attempting fallback generateContent for sources');
-          emitStatus('source-fetch', 'Checking web sources', 'running');
-          // Fallback: perform a quick non-stream call to obtain sources
-          try {
-            const gen = await generateContent(prompt, userId, {
-              history: chatHistory.slice(-10),
-              includeSearch,
-              uploads: files,
-              username,
-            });
-            finalSourcesWithTitles = Array.isArray(gen?.sources) ? gen.sources : [];
-            if (finalSourcesWithTitles.length > 0) {
-              console.log(`[chatStream] fallback produced sources: count=${finalSourcesWithTitles.length}`);
-              if (!res.writableEnded) {
-                res.write(`event: sources\n`);
-                res.write(`data: ${JSON.stringify({ sources: finalSourcesWithTitles })}\n\n`);
-              }
-              emitStatus('source-fetch', 'Sources ready', 'complete', `${finalSourcesWithTitles.length} source${finalSourcesWithTitles.length === 1 ? '' : 's'}`);
-            } else {
-              console.log('[chatStream] fallback produced no sources');
-              if (!res.writableEnded) {
-                console.log('[chatStream] emitting empty sources event');
-                res.write(`event: sources\n`);
-                res.write(`data: {"sources": []}\n\n`);
-              }
-              emitStatus('source-fetch', 'No web sources found', 'complete');
-            }
-          } catch (e) {
-            console.warn('Fallback source fetch failed:', e?.message || e);
-            if (!res.writableEnded) {
-              console.log('[chatStream] emitting empty sources event due to fallback error');
-              res.write(`event: sources\n`);
-              res.write(`data: {"sources": []}\n\n`);
-            }
-            emitStatus('source-fetch', 'Source check failed', 'error', e?.message || 'Unable to resolve sources');
+          console.log('[chatStream] no streamed grounding sources found');
+          if (!res.writableEnded) {
+            res.write(`event: sources\n`);
+            res.write(`data: {"sources": []}\n\n`);
           }
+          emitStatus('source-fetch', 'No web sources found', 'complete');
         }
       } catch (e) {
         console.warn('Failed to emit sources/title message:', e?.message || e);
