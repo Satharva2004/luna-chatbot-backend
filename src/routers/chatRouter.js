@@ -1,7 +1,7 @@
 import express from 'express';
 import { uploadArray } from "../middleware/upload.js";
 import { authenticate, requireAuth } from "../middleware/auth.js";
-import { handleChatGenerate, handleChatStreamGenerate, getConversations, getConversationHistory, deleteConversation } from "../controllers/chatController.js";
+import { handleChatGenerate, handleChatStreamGenerate, getConversations, getConversationHistory, deleteConversation, searchMessages } from "../controllers/chatController.js";
 
 const router = express.Router();
 
@@ -19,5 +19,8 @@ router.get('/conversations/:conversationId', authenticate, requireAuth, getConve
 
 // Delete a conversation
 router.delete('/conversations/:conversationId', authenticate, requireAuth, deleteConversation);
+
+// Full-text search across message content
+router.get('/search', authenticate, requireAuth, searchMessages);
 
 export default router;

@@ -160,6 +160,35 @@ export const loginUser = async (req, res) => {
   }
 };
 
+export const updateProfile = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { username } = req.body;
+
+    if (!username || !String(username).trim()) {
+      return res.status(400).json({ error: 'Username is required' });
+    }
+
+    const { data: updatedUser, error } = await supabase
+      .from('users')
+      .update({ username: String(username).trim() })
+      .eq('id', userId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Error updating profile:', error);
+      return res.status(500).json({ error: 'Failed to update profile' });
+    }
+
+    const { password_hash: _, ...userWithoutPassword } = updatedUser;
+    res.status(200).json({ status: 'success', user: userWithoutPassword });
+  } catch (error) {
+    console.error('Error in updateProfile:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 export const googleAuth = async (req, res) => {
   try {
     if (!googleOAuthClient) {

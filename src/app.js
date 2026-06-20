@@ -5,6 +5,7 @@ import cors from "cors";
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import geminiRouter from "./routers/geminiRouter.js";
+import { getAPIKeyStatus } from "./helpers/gemini.js";
 import userRouter from "./routers/userRouter.js";
 import chatRouter from "./routers/chatRouter.js";
 import speechRouter from "./routers/speechRouter.js";
@@ -102,6 +103,18 @@ app.use("/api/youtube", youtubeRouter); // MCP (Model Context Protocol) endpoint
 app.use("/api/chat", chatRouter); // Chat endpoints
 app.use("/api/feedback", feedbackRouter);
 app.use("/api/proxy", proxyRouter);
+
+// API key health status
+app.get("/api/status", (req, res) => {
+  const status = getAPIKeyStatus();
+  res.json({
+    total: status.totalKeys,
+    available: status.availableKeys,
+    exhausted: status.failedKeys.length,
+    nextRefreshMs: status.nextRefreshMs,
+    totalRequests: status.totalRequests,
+  });
+});
 
 // Health check
 app.get("/", (req, res) => {

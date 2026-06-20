@@ -1,17 +1,27 @@
 // src/helpers/charts.js
 import fetch from "node-fetch";
-import env from "../config/env.js";
 import { CHARTS_PROMPT } from "../prompts/charts.js";
-import { extractTextFromUploads, extractImagesFromUploads } from "./gemini.js";
+import {
+  extractTextFromUploads,
+  extractImagesFromUploads,
+  getNextGeminiApiKey,
+  markGeminiApiKeyFailed,
+  markGeminiApiKeyHealthy,
+  incrementGeminiKeyCount,
+  rotateGeminiApiKey,
+} from "./gemini.js";
 import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
 const QUICKCHART_API_URL = "https://quickchart.io/chart/create";
 const MAX_HISTORY_MESSAGES = 10;
-const ai = new GoogleGenAI({
-  apiKey: env.GEMINI_API_KEY,
-});
+
+function getAIClient() {
+  const keyInfo = getNextGeminiApiKey();
+  if (!keyInfo) return null;
+  return { client: new GoogleGenAI({ apiKey: keyInfo.key }), keyIndex: keyInfo.index };
+}
 const SUPPORTED_CHART_TYPES = new Set([
   "bar",
   "line",
@@ -155,14 +165,24 @@ export async function generateCharts(prompt, userId = 'default', options = {}) {
     responseMimeType: 'application/json',
   };
 
+  const aiClient = getAIClient();
+  if (!aiClient) {
+    return { ok: false, error: 'All Gemini API keys are currently rate limited', status: null, processingTime: Date.now() - start };
+  }
+
   let response;
   try {
-    response = await ai.models.generateContent({
+    response = await aiClient.client.models.generateContent({
       model: 'gemini-2.5-flash-lite',
       contents,
       config,
     });
+    markGeminiApiKeyHealthy(aiClient.keyIndex);
+    incrementGeminiKeyCount(aiClient.keyIndex);
+    rotateGeminiApiKey();
   } catch (error) {
+    markGeminiApiKeyFailed(aiClient.keyIndex, 60000);
+    rotateGeminiApiKey();
     console.error('Gemini generateContent failed for charts:', error);
     if (error && typeof error.message === 'string') {
       console.error('Gemini error message (charts):', error.message);
