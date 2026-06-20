@@ -1,23 +1,18 @@
 // helpers/gemini.js
 import fetch from "node-fetch";
 import { RESEARCH_ASSISTANT_PROMPT } from "../prompts/researchAssistantPrompt.js";
-import { REAL_ESTATE_EXPERT_PROMPT } from "../prompts/realestateexpert.js";
-import { CRYPTO_EXPERT_PROMPT } from "../prompts/cryptoexpert.js";
-import { PORTFOLIO_EXPERT_PROMPT as INVESTMENT_EXPERT_PROMPT } from "../prompts/investmentexpert.js";
-import { STOCK_EXPERT_PROMPT } from "../prompts/stockexpert.js";
-import { RETIREMENT_TAX_EXPERT_PROMPT } from "../prompts/retierment_tax_expert.js";
 import { generateExcalidrawFlowchart } from "./groq.js";
 
 import env from "../config/env.js";
 
-// Map of expert types to their corresponding prompts
+export const AVAILABLE_MODELS = {
+  fast: 'gemini-2.5-flash-lite-preview-06-17',
+  smart: 'gemini-2.5-flash',
+  best: 'gemini-2.5-pro',
+};
+
 const EXPERT_PROMPTS = {
   'research': RESEARCH_ASSISTANT_PROMPT,
-  'real-estate': REAL_ESTATE_EXPERT_PROMPT,
-  'crypto': CRYPTO_EXPERT_PROMPT,
-  'investment': INVESTMENT_EXPERT_PROMPT,
-  'stock': STOCK_EXPERT_PROMPT,
-  'retirement-tax': RETIREMENT_TAX_EXPERT_PROMPT,
   'default': RESEARCH_ASSISTANT_PROMPT,
 };
 
@@ -43,6 +38,7 @@ function collectGeminiApiKeys() {
 }
 
 const GEMINI_API_KEYS = collectGeminiApiKeys();
+console.log(`[gemini] Key pool initialized: ${GEMINI_API_KEYS.length} key(s) loaded`);
 
 export const MODEL_ID = "gemini-2.5-flash-lite";
 export const GENERATE_CONTENT_API = "generateContent";
@@ -133,6 +129,17 @@ class APIKeyManager {
     this.currentIndex = 0;
     this.failedKeys = new Set();
     this.keyRetryTime = new Map();
+    this.requestCounts = new Map(); // keyIndex → total requests made
+  }
+
+  incrementCount(keyIndex) {
+    this.requestCounts.set(keyIndex, (this.requestCounts.get(keyIndex) || 0) + 1);
+  }
+
+  getTotalRequests() {
+    let total = 0;
+    for (const count of this.requestCounts.values()) total += count;
+    return total;
   }
 
   getCurrentKey() {
@@ -595,6 +602,10 @@ export function rotateGeminiApiKey() {
   keyManager.rotateKey();
 }
 
+export function incrementGeminiKeyCount(keyIndex) {
+  keyManager.incrementCount(keyIndex);
+}
+
 async function parsePdfBuffer(buf) {
   try {
     const mod = await import('pdf-parse');
@@ -820,7 +831,8 @@ export async function generateContent(
       console.log(`Attempt ${attemptsCount}/${maxAttempts} using key #${keyInfo.index}`);
 
       try {
-        const url = `${BASE_URL}/${MODEL_ID}:${GENERATE_CONTENT_API}?key=${keyInfo.key}`;
+        const selectedModel = options.model || MODEL_ID;
+        const url = `${BASE_URL}/${selectedModel}:${GENERATE_CONTENT_API}?key=${keyInfo.key}`;
 
         const response = await fetchWithTimeout(url, {
           method: 'POST',
@@ -863,6 +875,7 @@ export async function generateContent(
         // Process successful response
         const result = await processGeminiResponse(data);
         keyManager.markKeyHealthy(keyInfo.index);
+        keyManager.incrementCount(keyInfo.index);
         keyManager.rotateKey();
 
         // Check if we got empty content and handle it
@@ -961,11 +974,21 @@ export function getChatHistory(userId) {
 }
 
 export function getAPIKeyStatus() {
+  const now = Date.now()
+  let nextRefreshMs = null
+  for (const [, retryTime] of keyManager.keyRetryTime.entries()) {
+    if (retryTime > now) {
+      const diff = retryTime - now
+      if (nextRefreshMs === null || diff < nextRefreshMs) nextRefreshMs = diff
+    }
+  }
   return {
     totalKeys: GEMINI_API_KEYS.length,
     currentKeyIndex: keyManager.currentIndex,
     failedKeys: Array.from(keyManager.failedKeys),
-    availableKeys: GEMINI_API_KEYS.length - keyManager.failedKeys.size
+    availableKeys: GEMINI_API_KEYS.length - keyManager.failedKeys.size,
+    nextRefreshMs,
+    totalRequests: keyManager.getTotalRequests(),
   };
 }
 

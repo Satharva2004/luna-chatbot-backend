@@ -14,6 +14,7 @@ import {
   markGeminiApiKeyFailed,
   markGeminiApiKeyHealthy,
   rotateGeminiApiKey,
+  incrementGeminiKeyCount,
 } from '../helpers/gemini.js';
 import { searchImages } from '../helpers/imageSearch.js';
 import { RESEARCH_ASSISTANT_PROMPT } from '../prompts/researchAssistantPrompt.js';
@@ -347,7 +348,7 @@ function cleanMediaQuery(rawQuery = '', type = 'image', maxLength = 96) {
   return query.slice(0, maxLength).trim();
 }
 
-function buildMediaSearchPlan({ prompt, history, extra } = {}) {
+function buildMediaSearchPlan({ prompt, history, extra, explicitYouTube = false, explicitImages = false } = {}) {
   const cleanPrompt = normalizeSearchText(prompt);
   const lowerPrompt = cleanPrompt.toLowerCase();
   const topicFromHistory = latestUserTopic(history);
@@ -358,6 +359,24 @@ function buildMediaSearchPlan({ prompt, history, extra } = {}) {
   const baseTopic = isFollowUp && topicFromHistory
     ? `${topicFromHistory} ${cleanPrompt}`
     : cleanPrompt || topicFromHistory;
+
+  // When the user explicitly toggled a tool on, use their raw prompt directly
+  // as the search query rather than the cleaned/extracted version, which prevents
+  // irrelevant results caused by over-aggressive stopword stripping.
+  if (explicitYouTube || explicitImages) {
+    const rawQuery = cleanPrompt || topicFromHistory;
+    const imageQuery = explicitImages ? rawQuery.slice(0, 96) : cleanMediaQuery(
+      [baseTopic, extra].filter(Boolean).join(' '), 'image'
+    );
+    const youtubeQuery = explicitYouTube ? rawQuery.slice(0, 96) : cleanMediaQuery(baseTopic, 'youtube');
+    return {
+      originalPrompt: cleanPrompt,
+      imageQuery,
+      youtubeQuery,
+      shouldFetchImages: explicitImages && Boolean(imageQuery),
+      shouldFetchVideos: explicitYouTube && Boolean(youtubeQuery),
+    };
+  }
 
   const explicitImageIntent = /\b(image|images|photo|photos|picture|pictures|look like|looks like|visual)\b/i.test(lowerPrompt);
   const explicitVideoIntent = /\b(youtube|video|videos|tutorial|tutorials|lecture|lectures|course|courses|watch)\b/i.test(lowerPrompt);
@@ -486,7 +505,7 @@ function geminiRetryDelayFromHeaders(headers, fallbackMs = 300000) {
   return fallbackMs;
 }
 
-async function fetchGeminiStreamWithKeyRotation({ body, signal }) {
+async function fetchGeminiStreamWithKeyRotation({ body, signal, model }) {
   const maxAttempts = getGeminiMaxAttempts();
   let lastError = null;
 
@@ -497,7 +516,8 @@ async function fetchGeminiStreamWithKeyRotation({ body, signal }) {
       break;
     }
 
-    const url = `${BASE_URL}/${MODEL_ID}:streamGenerateContent?alt=sse&key=${keyInfo.key}`;
+    const selectedModel = model || MODEL_ID;
+    const url = `${BASE_URL}/${selectedModel}:streamGenerateContent?alt=sse&key=${keyInfo.key}`;
     console.log(`[chatStream] Gemini stream attempt ${attempt}/${maxAttempts} using key index ${keyInfo.index}`);
 
     try {
@@ -513,6 +533,7 @@ async function fetchGeminiStreamWithKeyRotation({ body, signal }) {
 
       if (response.ok && response.body) {
         markGeminiApiKeyHealthy(keyInfo.index);
+        incrementGeminiKeyCount(keyInfo.index);
         rotateGeminiApiKey();
         return { upstream: response, attempts: attempt };
       }
@@ -875,7 +896,13 @@ export async function handleChatStreamGenerate(req, res) {
     const includeSearch = typeof options.includeSearch === 'boolean' ? options.includeSearch : (files.length === 0);
     const systemPrompt = options.systemPrompt || RESEARCH_ASSISTANT_PROMPT({ username });
     const uploadContext = uploadedText ? uploadedText.slice(0, 400) : '';
-    const mediaPlan = buildMediaSearchPlan({ prompt, history: messages, extra: uploadContext });
+    const mediaPlan = buildMediaSearchPlan({
+      prompt,
+      history: messages,
+      extra: uploadContext,
+      explicitYouTube: options.includeYouTube === true,
+      explicitImages: options.includeImageSearch === true,
+    });
     const includeImageSearch =
       options.includeImageSearch === true ||
       (options.includeImageSearch !== false && mediaPlan.shouldFetchImages);
@@ -956,7 +983,7 @@ export async function handleChatStreamGenerate(req, res) {
     }
 
     emitStatus('model-generation', 'Generating answer', 'running');
-    const streamResult = await fetchGeminiStreamWithKeyRotation({ body });
+    const streamResult = await fetchGeminiStreamWithKeyRotation({ body, model: options.model });
     const upstream = streamResult.upstream;
 
     if (!upstream?.body) {
@@ -981,6 +1008,19 @@ export async function handleChatStreamGenerate(req, res) {
 
       try {
         const obj = JSON.parse(payload);
+
+        // Detect Gemini API-level errors returned inside the stream body
+        if (obj?.error) {
+          const apiErr = obj.error;
+          const msg = apiErr?.message || `Gemini error ${apiErr?.code || 'unknown'}`;
+          console.error(`[chatStream] Gemini API error in stream body: code=${apiErr?.code} status=${apiErr?.status} message=${msg}`);
+          if (!res.writableEnded) {
+            res.write(`event: error\n`);
+            res.write(`data: ${JSON.stringify({ error: msg })}\n\n`);
+          }
+          return;
+        }
+
         const cand = obj?.candidates?.[0];
         const parts = cand?.content?.parts;
         if (Array.isArray(parts)) {
@@ -1125,6 +1165,16 @@ export async function handleChatStreamGenerate(req, res) {
         sseBuffer = '';
       }
 
+      // If the stream ended with no content at all, the model returned nothing useful
+      if (!streamedContent.trim() && !res.writableEnded) {
+        const reason = lastFinishReason ? ` (${lastFinishReason})` : '';
+        console.warn(`[chatStream] Stream ended with empty content${reason} — emitting error`);
+        res.write(`event: error\n`);
+        res.write(`data: ${JSON.stringify({ error: `The model returned no content${reason}. Please try again.` })}\n\n`);
+        res.end();
+        return;
+      }
+
       try {
         let mermaidProcessingResult = { content: streamedContent, blocks: [] };
         try {
@@ -1236,7 +1286,7 @@ export async function handleChatStreamGenerate(req, res) {
       try {
         emitStatus('model-generation', 'Generation failed', 'error', err?.message || 'stream error');
         res.write(`event: error\n`);
-        res.write(`data: ${JSON.stringify({ message: err?.message || "stream error" })}\n\n`);
+        res.write(`data: ${JSON.stringify({ error: err?.message || "stream error" })}\n\n`);
       } finally {
         res.end();
       }
@@ -1254,7 +1304,7 @@ export async function handleChatStreamGenerate(req, res) {
       }
       if (!res.writableEnded) {
         res.write(`event: error\n`);
-        res.write(`data: ${JSON.stringify({ message: error?.message || 'stream error' })}\n\n`);
+        res.write(`data: ${JSON.stringify({ error: error?.message || 'stream error' })}\n\n`);
       }
     } catch (_) {
       // swallow
@@ -1395,6 +1445,213 @@ export async function deleteConversation(req, res) {
     return res.json({ success: true });
   } catch (error) {
     console.error('Error in deleteConversation:', error);
+    res.status(500).json({ error: error.message });
+  }
+}
+
+// Full-text search across message content
+export async function searchMessages(req, res) {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const q = String(req.query.q || '').trim();
+    if (q.length < 2) return res.status(400).json({ error: 'Query too short' });
+
+    // Find messages matching the query that belong to this user's conversations
+    const { data: userConversations, error: convError } = await supabase
+      .from('conversations')
+      .select('id')
+      .eq('user_id', userId);
+
+    if (convError) throw convError;
+
+    const conversationIds = (userConversations || []).map(c => c.id);
+    if (conversationIds.length === 0) return res.json([]);
+
+    const { data: messages, error: msgError } = await supabase
+      .from('messages')
+      .select('conversation_id')
+      .in('conversation_id', conversationIds)
+      .ilike('content', `%${q}%`)
+      .limit(100);
+
+    if (msgError) throw msgError;
+
+    const matchedIds = [...new Set((messages || []).map(m => m.conversation_id))];
+    if (matchedIds.length === 0) return res.json([]);
+
+    const { data: conversations, error: finalError } = await supabase
+      .from('conversations')
+      .select('id, title, updated_at, created_at')
+      .in('id', matchedIds)
+      .order('updated_at', { ascending: false });
+
+    if (finalError) throw finalError;
+
+    res.json(conversations || []);
+  } catch (error) {
+    console.error('Error in searchMessages:', error);
+    res.status(500).json({ error: 'Search failed' });
+  }
+}
+
+export async function renameConversation(req, res) {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { conversationId } = req.params;
+    const { title } = req.body;
+    if (!title || !String(title).trim()) return res.status(400).json({ error: 'Title is required' });
+
+    const cleanTitle = String(title).trim().slice(0, 100);
+
+    const { data: conversation, error: convError } = await supabase
+      .from('conversations')
+      .select('id, user_id')
+      .eq('id', conversationId)
+      .single();
+
+    if (convError || !conversation) return res.status(404).json({ error: 'Conversation not found' });
+    if (conversation.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    const { error } = await supabase
+      .from('conversations')
+      .update({ title: cleanTitle, updated_at: new Date().toISOString() })
+      .eq('id', conversationId);
+
+    if (error) throw error;
+    return res.json({ success: true, title: cleanTitle });
+  } catch (error) {
+    console.error('Error in renameConversation:', error);
+    res.status(500).json({ error: error.message });
+  }
+}
+
+export async function getSuggestions(req, res) {
+  try {
+    const { lastMessage } = req.body;
+    if (!lastMessage) return res.status(400).json({ error: 'lastMessage is required' });
+
+    const snippet = String(lastMessage).slice(0, 1200);
+    const suggestPrompt = `Based on this AI response, generate exactly 3 concise follow-up questions a user might ask next. Return only a JSON array of 3 strings, no markdown, no explanation.\n\nResponse:\n${snippet}\n\nJSON:`;
+
+    const keyInfo = getNextGeminiApiKey();
+    if (!keyInfo) return res.status(503).json({ suggestions: [] });
+
+    const url = `${BASE_URL}/${MODEL_ID}:generateContent?key=${keyInfo.key}`;
+    const body = {
+      contents: [{ role: 'user', parts: [{ text: suggestPrompt }] }],
+      generationConfig: { temperature: 0.7, maxOutputTokens: 256 }
+    };
+
+    const abortCtrl = new AbortController();
+    const abortTimer = setTimeout(() => abortCtrl.abort(), 8000);
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: abortCtrl.signal,
+    });
+    clearTimeout(abortTimer);
+
+    if (!resp.ok) {
+      markGeminiApiKeyFailed(keyInfo.index, 60000);
+      rotateGeminiApiKey();
+      return res.json({ suggestions: [] });
+    }
+
+    markGeminiApiKeyHealthy(keyInfo.index);
+    incrementGeminiKeyCount(keyInfo.index);
+    rotateGeminiApiKey();
+
+    const data = await resp.json();
+    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+    const match = raw.match(/\[[\s\S]*\]/);
+    let suggestions = [];
+    if (match) {
+      try { suggestions = JSON.parse(match[0]).slice(0, 3); } catch (_) {}
+    }
+    return res.json({ suggestions });
+  } catch (error) {
+    return res.json({ suggestions: [] });
+  }
+}
+
+export async function getUserStats(req, res) {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const weekStart = new Date();
+    weekStart.setDate(weekStart.getDate() - 7);
+    const weekStartIso = weekStart.toISOString();
+
+    const [totalConvResult, weekConvResult, totalMsgResult, weekMsgResult] = await Promise.all([
+      supabase.from('conversations').select('id', { count: 'exact', head: true }).eq('user_id', userId),
+      supabase.from('conversations').select('id', { count: 'exact', head: true }).eq('user_id', userId).gte('created_at', weekStartIso),
+      supabase.from('messages').select('messages.id', { count: 'exact', head: true }).eq('conversations.user_id', userId),
+      supabase.from('messages').select('messages.id', { count: 'exact', head: true }).eq('conversations.user_id', userId).gte('messages.created_at', weekStartIso),
+    ]);
+
+    const convIds = await supabase
+      .from('conversations')
+      .select('id')
+      .eq('user_id', userId);
+
+    const ids = (convIds.data || []).map(c => c.id);
+    let totalMessages = 0, weekMessages = 0;
+
+    if (ids.length > 0) {
+      const [allMsg, weekMsg] = await Promise.all([
+        supabase.from('messages').select('id', { count: 'exact', head: true }).in('conversation_id', ids),
+        supabase.from('messages').select('id', { count: 'exact', head: true }).in('conversation_id', ids).gte('created_at', weekStartIso),
+      ]);
+      totalMessages = allMsg.count || 0;
+      weekMessages = weekMsg.count || 0;
+    }
+
+    return res.json({
+      totalConversations: totalConvResult.count || 0,
+      weekConversations: weekConvResult.count || 0,
+      totalMessages,
+      weekMessages,
+    });
+  } catch (error) {
+    console.error('Error in getUserStats:', error);
+    res.status(500).json({ error: error.message });
+  }
+}
+
+export async function updateMessageExcalidraw(req, res) {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { messageId } = req.params;
+    const { excalidrawData } = req.body;
+    if (!excalidrawData) return res.status(400).json({ error: 'excalidrawData is required' });
+
+    // Verify ownership via conversation join
+    const { data: message, error: msgError } = await supabase
+      .from('messages')
+      .select('id, conversation_id, conversations(user_id)')
+      .eq('id', messageId)
+      .single();
+
+    if (msgError || !message) return res.status(404).json({ error: 'Message not found' });
+    if (message.conversations?.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    const { error } = await supabase
+      .from('messages')
+      .update({ excalidraw: excalidrawData })
+      .eq('id', messageId);
+
+    if (error) throw error;
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Error in updateMessageExcalidraw:', error);
     res.status(500).json({ error: error.message });
   }
 }

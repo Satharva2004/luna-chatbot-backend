@@ -3,7 +3,7 @@ import express from "express";
 import { handleGenerate } from "../controllers/geminiController.js";
 import { uploadArray } from "../middleware/upload.js";
 import { authenticate, requireAuth } from "../middleware/auth.js";
-import { handleChatGenerate, handleChatStreamGenerate, getConversations, getConversationHistory, deleteConversation } from "../controllers/chatController.js";
+import { handleChatGenerate, handleChatStreamGenerate, getConversations, getConversationHistory, deleteConversation, renameConversation, getSuggestions, getUserStats, updateMessageExcalidraw } from "../controllers/chatController.js";
 import { handleChartsGenerate, handleChatWithChartsParallel } from "../controllers/chartsController.js";
 import { handleExcalidrawGenerate, handleFlowchartDescribe, handleExcalidrawHealth } from "../controllers/excalidrawController.js";
 
@@ -17,7 +17,11 @@ router.post("/chat", authenticate, requireAuth, uploadArray, handleChatGenerate)
 router.post("/chat/stream", authenticate, requireAuth, uploadArray, handleChatStreamGenerate);
 router.get("/conversations", authenticate, requireAuth, getConversations);
 router.get("/conversations/:conversationId", authenticate, requireAuth, getConversationHistory);
+router.patch("/conversations/:conversationId", authenticate, requireAuth, renameConversation);
 router.delete("/conversations/:conversationId", authenticate, requireAuth, deleteConversation);
+router.post("/suggestions", getSuggestions);
+router.get("/stats", authenticate, requireAuth, getUserStats);
+router.patch("/messages/:messageId/excalidraw", authenticate, requireAuth, updateMessageExcalidraw);
 
 // Charts-only generation (non-stream). Returns Chart.js JSON.
 router.post("/charts", authenticate, requireAuth, uploadArray, handleChartsGenerate);
