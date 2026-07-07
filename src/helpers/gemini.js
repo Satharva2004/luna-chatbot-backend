@@ -6,7 +6,7 @@ import { generateExcalidrawFlowchart } from "./groq.js";
 import env from "../config/env.js";
 
 export const AVAILABLE_MODELS = {
-  fast: 'gemini-2.5-flash-lite-preview-06-17',
+  fast: 'gemini-2.5-flash-lite',
   smart: 'gemini-2.5-flash',
   best: 'gemini-2.5-pro',
 };
@@ -43,6 +43,40 @@ console.log(`[gemini] Key pool initialized: ${GEMINI_API_KEYS.length} key(s) loa
 export const MODEL_ID = "gemini-2.5-flash-lite";
 export const GENERATE_CONTENT_API = "generateContent";
 export const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+
+// Catches retired/renamed Gemini model IDs (e.g. a preview model that got sunset) at
+// startup instead of via a 404 the first time a user hits that code path in prod.
+export async function validateConfiguredGeminiModels() {
+  if (GEMINI_API_KEYS.length === 0) {
+    console.warn('[gemini] Skipping model validation: no API keys configured');
+    return;
+  }
+
+  const configuredModels = Array.from(new Set([MODEL_ID, ...Object.values(AVAILABLE_MODELS)]));
+
+  try {
+    const response = await fetch(`${BASE_URL}?key=${GEMINI_API_KEYS[0]}`);
+    if (!response.ok) {
+      console.warn(`[gemini] Model validation skipped: ListModels returned HTTP ${response.status}`);
+      return;
+    }
+
+    const data = await response.json();
+    const supportedModels = new Set(
+      (data.models || [])
+        .filter((m) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes(GENERATE_CONTENT_API))
+        .map((m) => String(m.name || '').replace(/^models\//, ''))
+    );
+
+    for (const modelId of configuredModels) {
+      if (!supportedModels.has(modelId)) {
+        console.error(`[gemini] CONFIGURED MODEL NOT AVAILABLE: "${modelId}" is not found or does not support ${GENERATE_CONTENT_API}. Requests using it will fail with a 404. Update MODEL_ID/AVAILABLE_MODELS in helpers/gemini.js.`);
+      }
+    }
+  } catch (error) {
+    console.warn('[gemini] Model validation failed:', error?.message || error);
+  }
+}
 
 // Configuration constants
 const CONFIG = {

@@ -1,10 +1,13 @@
 // server.js
 import env from './config/env.js';
 import app from "./app.js";
+import { validateConfiguredGeminiModels } from './helpers/gemini.js';
 
 // When running on Vercel serverless, export the Express app as the default handler.
 // When running locally (e.g., `node backend/src/server.js`), start the HTTP server.
 const isVercel = !!process.env.VERCEL;
+
+void validateConfiguredGeminiModels();
 
 if (!isVercel) {
   const PORT = env.PORT || 5000;
