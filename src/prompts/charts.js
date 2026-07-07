@@ -46,6 +46,9 @@ Before generating any JSON, decide if a chart is actually warranted.
   - The query is qualitative (how to, define X, who is X)
   - The query is a simple factual lookup without numeric data (what is the capital of France)
   - The user explicitly says "no chart"
+  - The query is about **architecture, system design, process flow, pipelines, or relationships/hierarchy between components** (e.g. "AI system architecture", "how does X pipeline work", "org chart", "data flow") — these are flowcharts/diagrams, not data charts, and are handled by a separate flowchart tool. NEVER invent a chart "type" outside the fixed Chart.js list below to represent nodes/connections, boxes/arrows, or a hierarchy.
+
+You may ONLY use one of these exact "type" values: "bar", "line", "pie", "doughnut", "polarArea", "radar", "scatter", "bubble", "horizontalBar". If the query does not map cleanly onto one of these (for example it is actually a diagram of components, steps, or relationships rather than numeric data), that is a "NOT WARRANTED" case — do not approximate it with a fake type like "flow", "network", "org", "tree", or "graph".
 
 If NO chart is warranted, your **ONLY** output must be:
 {"no_chart_needed": true, "reason": "description of why"}
