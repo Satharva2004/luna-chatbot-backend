@@ -119,6 +119,28 @@ const EXCALIDRAW_FUNCTION_DECLARATION = {
 // Retryable HTTP status codes
 const RETRYABLE_STATUS_CODES = new Set([429, 502, 503, 504]);
 
+// Gemini embeds the real retry delay in the error body (error.details[].retryDelay,
+// e.g. "23s"), not in a Retry-After header. Falling back to a flat 5-minute
+// cooldown for every quota error can blacklist a key for far longer than the
+// actual per-minute quota reset, and does it for every key that gets hit in a
+// burst -- looking like key rotation "doesn't work" when it's really just an
+// overly long, made-up cooldown.
+function retryDelayFromGeminiError(data, fallbackMs) {
+  const details = data?.error?.details;
+  if (Array.isArray(details)) {
+    for (const detail of details) {
+      const retryDelay = detail?.retryDelay;
+      if (typeof retryDelay === 'string') {
+        const seconds = Number(retryDelay.replace(/s$/i, ''));
+        if (Number.isFinite(seconds) && seconds >= 0) {
+          return Math.max(1000, seconds * 1000);
+        }
+      }
+    }
+  }
+  return fallbackMs;
+}
+
 // Bounded LRU cache for page titles to avoid repeated requests and memory leaks
 const titleCache = new Map();
 
@@ -893,8 +915,13 @@ export async function generateContent(
           if (isQuotaError || RETRYABLE_STATUS_CODES.has(response.status)) {
             console.warn(`Retryable error (${response.status} - ${errorMessage}), trying next key...`);
 
-            // Mark key as failed for a simpler 1 minute if it's just a flake, or 5 mins if quota
-            keyManager.markKeyFailed(keyInfo.index, isQuotaError ? 300000 : 60000);
+            // Use Gemini's actual retry delay when it tells us one; otherwise a short
+            // cooldown (20s for quota, 60s for other retryable errors) rather than
+            // a blanket 5 minutes that outlives most per-minute quota resets.
+            const cooldownMs = isQuotaError
+              ? retryDelayFromGeminiError(data, 20000)
+              : 60000;
+            keyManager.markKeyFailed(keyInfo.index, cooldownMs);
             keyManager.rotateKey();
 
             if (attemptsCount < maxAttempts) {
