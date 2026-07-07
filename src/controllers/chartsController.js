@@ -71,7 +71,7 @@ async function fetchConversationHistory(conversationId) {
     });
 }
 
-async function saveChartMessage({ conversationId, chartUrl, prompt }) {
+async function saveChartMessage({ conversationId, chartUrl, prompt, messageId }) {
   if (!conversationId || !chartUrl) {
     return;
   }
@@ -82,22 +82,43 @@ async function saveChartMessage({ conversationId, chartUrl, prompt }) {
   }
 
   try {
-    const { data: existingMessages, error: fetchError } = await supabase
-      .from("messages")
-      .select("id, charts")
-      .eq("conversation_id", conversationId)
-      .eq("role", "model")
-      .order("created_at", { ascending: false })
-      .limit(1);
+    let targetMessage = null;
 
-    if (fetchError) {
-      console.error("Failed to fetch latest assistant message for chart attachment:", fetchError);
-      return;
+    // Regeneration requests know exactly which message the chart belongs to;
+    // avoid the "latest assistant message" heuristic below misattaching it.
+    if (messageId) {
+      const { data, error: fetchError } = await supabase
+        .from("messages")
+        .select("id, charts")
+        .eq("id", messageId)
+        .eq("conversation_id", conversationId)
+        .single();
+
+      if (fetchError || !data) {
+        console.warn("Target message not found for chart attachment, falling back to latest assistant message:", messageId);
+      } else {
+        targetMessage = data;
+      }
     }
 
-    const latestMessage = existingMessages?.[0];
+    if (!targetMessage) {
+      const { data: existingMessages, error: fetchError } = await supabase
+        .from("messages")
+        .select("id, charts")
+        .eq("conversation_id", conversationId)
+        .eq("role", "model")
+        .order("created_at", { ascending: false })
+        .limit(1);
 
-    if (!latestMessage) {
+      if (fetchError) {
+        console.error("Failed to fetch latest assistant message for chart attachment:", fetchError);
+        return;
+      }
+
+      targetMessage = existingMessages?.[0] || null;
+    }
+
+    if (!targetMessage) {
       console.warn(
         "No assistant message found to attach chart; skipping persistence for conversation",
         conversationId
@@ -105,7 +126,7 @@ async function saveChartMessage({ conversationId, chartUrl, prompt }) {
       return;
     }
 
-    const shouldSkipUpdate = latestMessage.charts && latestMessage.charts === chartUrl;
+    const shouldSkipUpdate = targetMessage.charts && targetMessage.charts === chartUrl;
     if (shouldSkipUpdate) {
       return;
     }
@@ -113,7 +134,7 @@ async function saveChartMessage({ conversationId, chartUrl, prompt }) {
     const { error: updateMessageError } = await supabase
       .from("messages")
       .update({ charts: chartUrl })
-      .eq("id", latestMessage.id);
+      .eq("id", targetMessage.id);
 
     if (updateMessageError) {
       console.error("Failed to update existing message with chart:", updateMessageError);
@@ -136,7 +157,7 @@ async function saveChartMessage({ conversationId, chartUrl, prompt }) {
 // Return only the charts JSON (non-stream)
 export async function handleChartsGenerate(req, res) {
   try {
-    const { prompt, conversationId: rawConversationId } = req.body || {};
+    const { prompt, conversationId: rawConversationId, messageId } = req.body || {};
     let { options } = req.body || {};
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: "Prompt is required" });
@@ -180,6 +201,7 @@ export async function handleChartsGenerate(req, res) {
         conversationId: validatedConversationId,
         chartUrl: result.chartUrl,
         prompt,
+        messageId: typeof messageId === 'string' ? messageId : undefined,
       });
     }
 
