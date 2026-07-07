@@ -33,8 +33,22 @@ if (!youtubeMCP) {
 const STREAM_FINISH_DEBOUNCE_MS = 80;
 const STREAM_CLOSE_DELAY_MS = 60;
 const sleep = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
-const FEATHERLESS_BASE_URL = env.FEATHERLESS_BASE_URL || 'https://api.featherless.ai/v1';
-const FEATHERLESS_MODEL_NAME = env.FEATHERLESS_MODEL_NAME || 'Qwen/Qwen2.5-7B-Instruct';
+
+const TITLE_STOPWORDS = new Set([
+  'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'to', 'of', 'in', 'on', 'for', 'and', 'or', 'but', 'with', 'at', 'by',
+  'from', 'about', 'as', 'into', 'like', 'through', 'after', 'over',
+  'between', 'out', 'against', 'during', 'without', 'before', 'under',
+  'around', 'among', 'me', 'my', 'i', 'you', 'your', 'please', 'can',
+  'could', 'would', 'should', 'do', 'does', 'did', 'it', 'this', 'that'
+]);
+
+function toTitleCase(text) {
+  return text
+    .split(' ')
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
 
 function buildFallbackConversationTitle(prompt) {
   const normalized = String(prompt || '').replace(/\s+/g, ' ').trim();
@@ -45,86 +59,35 @@ function buildFallbackConversationTitle(prompt) {
   return normalized.length > 52 ? `${normalized.slice(0, 49)}...` : normalized;
 }
 
-async function generateConversationTitle(prompt, answer = '') {
-  const apiKey = env.FEATHERLESS_API_KEY;
+function generateConversationTitle(prompt) {
   const fallbackTitle = buildFallbackConversationTitle(prompt);
+  const normalized = String(prompt || '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
-  if (!apiKey) {
+  if (!normalized) {
     return fallbackTitle;
   }
 
-  const promptSnippet = String(prompt || '').replace(/\s+/g, ' ').trim();
-  const answerSnippet = String(answer || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+  const words = normalized.split(' ').filter((word) => !TITLE_STOPWORDS.has(word.toLowerCase()));
+  const meaningfulWords = (words.length ? words : normalized.split(' ')).slice(0, 6);
 
-  if (!promptSnippet) {
+  if (!meaningfulWords.length) {
     return fallbackTitle;
   }
 
-  try {
-    const completionPrompt = [
-      'Generate a short chat title for this conversation.',
-      'Rules:',
-      '- 3 to 6 words only',
-      '- no quotes',
-      '- no markdown',
-      '- concise, natural, title case',
-      '- summarize the user intent',
-      '',
-      `User: ${promptSnippet}`,
-      answerSnippet ? `Assistant: ${answerSnippet}` : '',
-      '',
-      'Title:'
-    ].filter(Boolean).join('\n');
-
-    const response = await fetch(`${FEATHERLESS_BASE_URL}/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: FEATHERLESS_MODEL_NAME,
-        prompt: completionPrompt,
-        max_tokens: 24,
-        temperature: 0.2
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Featherless HTTP ${response.status}`);
-    }
-
-    const data = await response.json();
-    const rawTitle = typeof data?.choices?.[0]?.text === 'string'
-      ? data.choices[0].text
-      : typeof data?.text === 'string'
-        ? data.text
-        : '';
-
-    const cleanedTitle = rawTitle
-      .replace(/[\r\n]+/g, ' ')
-      .replace(/^title\s*:\s*/i, '')
-      .replace(/^["'`]+|["'`]+$/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    if (!cleanedTitle) {
-      return fallbackTitle;
-    }
-
-    return cleanedTitle.length > 60 ? cleanedTitle.slice(0, 57).trimEnd() + '...' : cleanedTitle;
-  } catch (error) {
-    console.warn('[conversation-title] Failed to generate title:', error?.message || error);
-    return fallbackTitle;
-  }
+  const title = toTitleCase(meaningfulWords.join(' ').toLowerCase());
+  return title.length > 60 ? `${title.slice(0, 57).trimEnd()}...` : title;
 }
 
-async function updateConversationTitle(conversationId, prompt, answer = '') {
+async function updateConversationTitle(conversationId, prompt) {
   if (!conversationId) {
     return null;
   }
 
-  const title = await generateConversationTitle(prompt, answer);
+  const title = generateConversationTitle(prompt);
 
   try {
     const { error } = await supabase
@@ -756,7 +719,7 @@ export async function handleChatGenerate(req, res) {
       .eq('id', currentConversationId);
 
     if (isNewConversation) {
-      void updateConversationTitle(currentConversationId, prompt, finalContent);
+      void updateConversationTitle(currentConversationId, prompt);
     }
 
     const apiResponse = {
@@ -1269,7 +1232,7 @@ export async function handleChatStreamGenerate(req, res) {
           .eq('id', currentConversationId);
 
         if (isNewConversation) {
-          void updateConversationTitle(currentConversationId, prompt, streamedContent);
+          void updateConversationTitle(currentConversationId, prompt);
         }
 
       } catch (dbError) {
