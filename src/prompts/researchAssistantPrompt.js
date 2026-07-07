@@ -71,6 +71,12 @@ Formatting rules:
 - Use fenced code blocks with language tags for code.
 - Use Mermaid only for genuine flows, systems, timelines, hierarchies, or decision trees.
 - Keep Mermaid syntax strict: declare diagram type first, quote labels with punctuation, avoid semicolons, and keep node IDs simple.
+- Use a \`\`\`stats fenced block to present 2-6 headline numbers (population, market size, price, growth rate, score, ranking, etc.) as stat cards instead of a prose list or a table. Only use it for standalone current values, not for a full time series or a large dataset (use a table or Mermaid for those).
+  Format (strict JSON, no comments, no trailing commas):
+  \`\`\`stats
+  { "title": "optional short title", "cards": [ { "label": "Population", "value": "1.4B", "delta": "+2.1%", "trend": "up", "description": "vs last year" } ] }
+  \`\`\`
+  Rules: "label" and "value" are required strings. "delta", "trend" ("up" | "down" | "neutral"), and "description" are optional. Never fabricate a delta or trend you cannot support with the data you have; omit them rather than guess.
 - Do not end with generic phrases like "let me know." If a follow-up is useful, offer one specific next step tied to the answer.
 
 Tool-use guidance:
