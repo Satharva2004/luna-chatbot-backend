@@ -311,9 +311,26 @@ function cleanMediaQuery(rawQuery = '', type = 'image', maxLength = 96) {
   return query.slice(0, maxLength).trim();
 }
 
+const GREETING_OR_ACK_PATTERN = /^(hi+|hello+|hey+|yo+|sup|thanks?( you)?|thx|ok(ay)?|yes|no|sure|cool|nice|great|bye|goodbye|good\s?(morning|afternoon|evening|night))[\s.!?]*$/i;
+
 function buildMediaSearchPlan({ prompt, history, extra, explicitYouTube = false, explicitImages = false } = {}) {
   const cleanPrompt = normalizeSearchText(prompt);
   const lowerPrompt = cleanPrompt.toLowerCase();
+
+  // A bare greeting/acknowledgement ("hi", "thanks", "ok") carries no searchable
+  // topic. Without this guard it either inherits an unrelated topic from history
+  // (short message => treated as a "follow-up") or gets searched for literally
+  // ("hi" as a YouTube query), and both produce irrelevant results for free.
+  if (GREETING_OR_ACK_PATTERN.test(cleanPrompt)) {
+    return {
+      originalPrompt: cleanPrompt,
+      imageQuery: '',
+      youtubeQuery: '',
+      shouldFetchImages: false,
+      shouldFetchVideos: false,
+    };
+  }
+
   const topicFromHistory = latestUserTopic(history);
   const isFollowUp =
     cleanPrompt.length < 36 ||
@@ -328,6 +345,7 @@ function buildMediaSearchPlan({ prompt, history, extra, explicitYouTube = false,
   // irrelevant results caused by over-aggressive stopword stripping.
   if (explicitYouTube || explicitImages) {
     const rawQuery = cleanPrompt || topicFromHistory;
+    const hasSearchableContent = searchTokens(rawQuery).length > 0;
     const imageQuery = explicitImages ? rawQuery.slice(0, 96) : cleanMediaQuery(
       [baseTopic, extra].filter(Boolean).join(' '), 'image'
     );
@@ -336,8 +354,8 @@ function buildMediaSearchPlan({ prompt, history, extra, explicitYouTube = false,
       originalPrompt: cleanPrompt,
       imageQuery,
       youtubeQuery,
-      shouldFetchImages: explicitImages && Boolean(imageQuery),
-      shouldFetchVideos: explicitYouTube && Boolean(youtubeQuery),
+      shouldFetchImages: explicitImages && Boolean(imageQuery) && hasSearchableContent,
+      shouldFetchVideos: explicitYouTube && Boolean(youtubeQuery) && hasSearchableContent,
     };
   }
 
@@ -449,23 +467,52 @@ function logMediaDiagnostics(plan, payload = {}) {
   });
 }
 
-function geminiRetryDelayFromHeaders(headers, fallbackMs = 300000) {
-  const retryAfter = headers?.get?.('retry-after');
-  if (!retryAfter) {
+function geminiRetryDelayFromBody(text, fallbackMs = 20000) {
+  if (!text) {
     return fallbackMs;
   }
 
-  const seconds = Number(retryAfter);
-  if (Number.isFinite(seconds) && seconds >= 0) {
-    return Math.max(1000, seconds * 1000);
-  }
-
-  const retryDate = Date.parse(retryAfter);
-  if (Number.isFinite(retryDate)) {
-    return Math.max(1000, retryDate - Date.now());
+  try {
+    const parsed = JSON.parse(text);
+    const details = parsed?.error?.details;
+    if (Array.isArray(details)) {
+      for (const detail of details) {
+        const retryDelay = detail?.retryDelay;
+        if (typeof retryDelay === 'string') {
+          const seconds = Number(retryDelay.replace(/s$/i, ''));
+          if (Number.isFinite(seconds) && seconds >= 0) {
+            return Math.max(1000, seconds * 1000);
+          }
+        }
+      }
+    }
+  } catch {
+    // Body wasn't JSON (or didn't include retry info); fall through to default.
   }
 
   return fallbackMs;
+}
+
+// Gemini does not send a Retry-After header on 429s -- the real delay lives in
+// the JSON error body (error.details[].retryDelay, e.g. "23s"). Falling back to
+// the header check alone meant every rate limit used a 5-minute cooldown,
+// which could blacklist the whole key pool for minutes after a normal
+// per-minute quota bump.
+function geminiRetryDelayFromHeaders(headers, text, fallbackMs = 20000) {
+  const retryAfter = headers?.get?.('retry-after');
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.max(1000, seconds * 1000);
+    }
+
+    const retryDate = Date.parse(retryAfter);
+    if (Number.isFinite(retryDate)) {
+      return Math.max(1000, retryDate - Date.now());
+    }
+  }
+
+  return geminiRetryDelayFromBody(text, fallbackMs);
 }
 
 async function fetchGeminiStreamWithKeyRotation({ body, signal, model }) {
@@ -505,7 +552,7 @@ async function fetchGeminiStreamWithKeyRotation({ body, signal, model }) {
       lastError = new Error(text || response.statusText || `Gemini HTTP ${response.status}`);
 
       if (isRetryableGeminiError(response.status, text) && attempt < maxAttempts) {
-        const retryAfterMs = geminiRetryDelayFromHeaders(response.headers);
+        const retryAfterMs = geminiRetryDelayFromHeaders(response.headers, text);
         console.warn(`[chatStream] Gemini key index ${keyInfo.index} hit retryable status ${response.status}; trying next key`);
         markGeminiApiKeyFailed(keyInfo.index, retryAfterMs);
         await sleep(250 * attempt);
