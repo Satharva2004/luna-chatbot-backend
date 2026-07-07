@@ -53,10 +53,6 @@ GOOGLE_CSE_ID=your_google_cse_id
 YOUTUBE_API_KEY=your_youtube_api_key
 
 SERPAPI_KEY=your_serpapi_key
-
-FEATHERLESS_API_KEY=your_featherless_key
-FEATHERLESS_BASE_URL=https://api.featherless.ai/v1
-FEATHERLESS_MODEL_NAME=Qwen/Qwen2.5-7B-Instruct
 ```
 
 ## Scripts
